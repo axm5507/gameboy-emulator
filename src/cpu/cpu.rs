@@ -215,6 +215,57 @@ impl CPU {
                 self.set_register(target, new_value);
                 self.registers.pc.wrapping_add(2)
             }
+            //jumps compute the next program counter directly instead of just
+            //advancing past themselves, so each helper returns new pc
+            Instruction::JP(test) => {
+                let should_jump = self.should_jump(test);
+                self.jump(should_jump)
+            }
+            Instruction::JR(test) => {
+                let should_jump = self.should_jump(test);
+                self.jump_relative(should_jump)
+            }
+            Instruction::JPI => self.registers.hl(),            
+        }
+    }
+
+    //This is to evaluate a jump's condition against current flags
+    //An unconditional jump is always true
+    fn should_jump(&self, test: JumpTest) -> bool {
+        match test {
+            JumpTest::NotZero => !self.registers.zero(),
+            JumpTest::Zero => self.registers.zero(),
+            JumpTest::NotCarry => !self.registers.carry(),
+            JumpTest::Carry => self.registers.carry(),
+            JumpTest::Always => true,
+        }
+    }
+
+    //Absolute jump. The 16 bit target address sits in the two bytes right after
+    //the opcode. The Game Boy is little-endian, which means the byte at pc+1 is the low
+    //half of the address and the byte at pc+2 is the high half
+    fn jump(&self, should_jump: bool) -> u16 {
+        if should_jump {
+            let low = self.bus.read_byte(self.registers.pc.wrapping_add(1)) as u16;
+            let high = self.bus.read_byte(self.registers.pc.wrapping_add(2)) as u16;
+            (high << 8) | low
+        } else {
+            //JP is 3 bytes wide (1 opcode + 2 address bytes), so skip past all of it
+            self.registers.pc.wrapping_add(3)
+        }
+    }
+
+    //Relative jump. The single byte after the opcode is a signed offset applied
+    //to the address of the instruction that follows this JR (pc + 2, since JR is
+    //2 bytes wide)
+    fn jump_relative(&self, should_jump: bool) -> u16 {
+        let next_pc = self.registers.pc.wrapping_add(2);
+        if should_jump {
+            let offset = self.bus.read_byte(self.registers.pc.wrapping_add(1)) as i8;
+            //wrapping_add handles negative offsets correctly
+            next_pc.wrapping_add(offset as u16)
+        } else {
+            next_pc
         }
     }
 
