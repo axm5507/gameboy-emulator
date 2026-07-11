@@ -48,10 +48,65 @@ impl Instruction {
         }
     }
 
-    fn from_byte_prefixed(_byte: u8) -> Option<Instruction> {
-        //this is what I need to do next after implementing the basic arithmetic instructions
-        None
+   //The 0xCB prefixed table is really easy to decode structurally, so I don't need to
+    //write out all 256 entries by hand.
+    //The low 3 bits(byte & 0x07) pick the target register: B,C,D,E,H,L,(HL),A
+    //The high bits pick the operation
+    //For BIT/RES/SET the middle 3 bits (byte >> 3 & 0x07) also encode which bit (0-7)
+    //I haven't written code to support the (HL) memory operand yet, so target index 6 decodes to None.
+    fn from_byte_prefixed(byte: u8) -> Option<Instruction> {
+        let target = Instruction::prefixed_target(byte)?;
+        let bit = Instruction::bit_position(byte);
+
+        let instruction = match byte {
+            0x00..=0x07 => Instruction::RLC(target),
+            0x08..=0x0F => Instruction::RRC(target),
+            0x10..=0x17 => Instruction::RL(target),
+            0x18..=0x1F => Instruction::RR(target),
+            0x20..=0x27 => Instruction::SLA(target),
+            0x28..=0x2F => Instruction::SRA(target),
+            0x30..=0x37 => Instruction::SWAP(target),
+            0x38..=0x3F => Instruction::SRL(target),
+            0x40..=0x7F => Instruction::BIT(target, bit),
+            0x80..=0xBF => Instruction::RESET(target, bit),
+            0xC0..=0xFF => Instruction::SET(target, bit),
+        };
+        Some(instruction)
     }
+
+    //This decodes the low 3 bits of a 0xCB opcode into a register target. Index 6 
+    //is the (HL) memory operand, which needs a memory access we haven't built yet,
+    //so we return None for it for now
+    fn prefixed_target(byte: u8) -> Option<ArithmeticTarget> {
+        match byte & 0x07 {
+            0 => Some(ArithmeticTarget::B),
+            1 => Some(ArithmeticTarget::C),
+            2 => Some(ArithmeticTarget::D),
+            3 => Some(ArithmeticTarget::E),
+            4 => Some(ArithmeticTarget::H),
+            5 => Some(ArithmeticTarget::L),
+            7 => Some(ArithmeticTarget::A),
+            //6 => (HL) for later
+            _ => None,
+        }
+    }
+
+    //This decodes bits 3 to 5 of a 0xCB opcode into the bit number used by BIT/RES/SET.
+    //For the rotate/shift/swap opcodes these bits are part of the operation
+    //selector instead, so the value we return there is ignored
+    fn bit_position(byte: u8) -> BitPosition {
+        match (byte >> 3) & 0x07 {
+            0 => BitPosition::B0,
+            1 => BitPosition::B1,
+            2 => BitPosition::B2,
+            3 => BitPosition::B3,
+            4 => BitPosition::B4,
+            5 => BitPosition::B5,
+            6 => BitPosition::B6,
+            _ => BitPosition::B7,
+        }
+    }
+
 
     fn from_byte_not_prefixed(byte: u8) -> Option<Instruction> {
         match byte {
