@@ -225,9 +225,132 @@ impl CPU {
                 let should_jump = self.should_jump(test);
                 self.jump_relative(should_jump)
             }
-            Instruction::JPI => self.registers.hl(),            
+            Instruction::JPI => self.registers.hl(), 
+            Instruction::LD(load_type) => self.execute_load(load_type),
         }
     }
+
+    //This runs a load and returns the next program counter. Each shape of load advances
+    //the pc by a different amount depending on how many bytes the opcode occupies
+    fn execute_load(&mut self, load_type: LoadType) -> u16 {
+        match load_type {
+            LoadType::Byte(target, source) => {
+                let source_value = match source {
+                    LoadByteSource::A => self.registers.a,
+                    LoadByteSource::B => self.registers.b,
+                    LoadByteSource::C => self.registers.c,
+                    LoadByteSource::D => self.registers.d,
+                    LoadByteSource::E => self.registers.e,
+                    LoadByteSource::H => self.registers.h,
+                    LoadByteSource::L => self.registers.l,
+                    LoadByteSource::D8 => self.read_next_byte(),
+                    LoadByteSource::HLI => self.bus.read_byte(self.registers.hl()),
+                };
+                match target {
+                    LoadByteTarget::A => self.registers.a = source_value,
+                    LoadByteTarget::B => self.registers.b = source_value,
+                    LoadByteTarget::C => self.registers.c = source_value,
+                    LoadByteTarget::D => self.registers.d = source_value,
+                    LoadByteTarget::E => self.registers.e = source_value,
+                    LoadByteTarget::H => self.registers.h = source_value,
+                    LoadByteTarget::L => self.registers.l = source_value,
+                    LoadByteTarget::HLI => self.bus.write_byte(self.registers.hl(), source_value),
+                }
+                //Only an immediate (D8) source makes this a 2 byte instruction, every
+                //other byte load is a single byte
+                match source {
+                    LoadByteSource::D8 => self.registers.pc.wrapping_add(2),
+                    _ => self.registers.pc.wrapping_add(1),
+                }
+            }
+            LoadType::Word(target) => {
+                let value = self.read_next_word();
+                match target {
+                    LoadWordTarget::BC => self.registers.set_bc(value),
+                    LoadWordTarget::DE => self.registers.set_de(value),
+                    LoadWordTarget::HL => self.registers.set_hl(value),
+                    LoadWordTarget::SP => self.registers.sp = value,
+                }
+                //opcode + 2 byte immediate word = 3 bytes
+                self.registers.pc.wrapping_add(3)
+            }
+            LoadType::AFromIndirect(indirect) => {
+                let address = self.indirect_address(indirect);
+                self.registers.a = self.bus.read_byte(address);
+                self.apply_indirect_hl_delta(indirect);
+                self.indirect_next_pc(indirect)
+            }
+            LoadType::IndirectFromA(indirect) => {
+                let address = self.indirect_address(indirect);
+                self.bus.write_byte(address, self.registers.a);
+                self.apply_indirect_hl_delta(indirect);
+                self.indirect_next_pc(indirect)
+            }
+            LoadType::AFromByteAddress => {
+                let offset = self.read_next_byte() as u16;
+                self.registers.a = self.bus.read_byte(0xFF00 + offset);
+                self.registers.pc.wrapping_add(2)
+            }
+            LoadType::ByteAddressFromA => {
+                let offset = self.read_next_byte() as u16;
+                self.bus.write_byte(0xFF00 + offset, self.registers.a);
+                self.registers.pc.wrapping_add(2)
+            }
+        }
+    }
+
+    //this works out the memory address an indirect load reads from or writes to.
+    fn indirect_address(&self, indirect: Indirect) -> u16 {
+        match indirect {
+            Indirect::BCIndirect => self.registers.bc(),
+            Indirect::DEIndirect => self.registers.de(),
+            //HL+ and HL- both use the *current* HL as the address; the adjustment
+            //happens afterwards in apply_indirect_hl_delta
+            Indirect::HLIndirectPlus => self.registers.hl(),
+            Indirect::HLIndirectMinus => self.registers.hl(),
+            Indirect::WordIndirect => self.read_next_word(),
+            Indirect::LastByteIndirect => 0xFF00 | (self.registers.c as u16),
+        }
+    }
+
+    //The auto-increment/auto-decrement side effect of the (HL+) and (HL-) loads
+    fn apply_indirect_hl_delta(&mut self, indirect: Indirect) {
+        match indirect {
+            Indirect::HLIndirectPlus => {
+                let hl = self.registers.hl();
+                self.registers.set_hl(hl.wrapping_add(1));
+            }
+            Indirect::HLIndirectMinus => {
+                let hl = self.registers.hl();
+                self.registers.set_hl(hl.wrapping_sub(1));
+            }
+            _ => {}
+        }
+    }
+
+    //This is a word-indirect load carries a 2 byte address (3 bytes total), the rest are
+    //single-byte opcodes that get their address from a register.=
+    fn indirect_next_pc(&self, indirect: Indirect) -> u16 {
+        match indirect {
+            Indirect::WordIndirect => self.registers.pc.wrapping_add(3),
+            _ => self.registers.pc.wrapping_add(1),
+        }
+    }
+
+    //This reads the immediate byte that follows the current opcode
+    fn read_next_byte(&self) -> u8 {
+        self.bus.read_byte(self.registers.pc.wrapping_add(1))
+    }
+
+    //This reads the immediate 16 bit word that follows the current opcode. The Game Boy
+    //is little endian, so the byte at pc+1 is the low half and pc+2 is the high half
+    fn read_next_word(&self) -> u16 {
+        let low = self.bus.read_byte(self.registers.pc.wrapping_add(1)) as u16;
+        let high = self.bus.read_byte(self.registers.pc.wrapping_add(2)) as u16;
+        (high << 8) | low
+    }
+
+    
 
     //This is to evaluate a jump's condition against current flags
     //An unconditional jump is always true
