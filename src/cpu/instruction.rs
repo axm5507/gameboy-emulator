@@ -51,6 +51,10 @@ pub enum Instruction {
     //building blocks for CALL and RET which will come next
     PUSH(StackTarget),
     POP(StackTarget),
+    //Function calls, CALL is a jump taht pushes the address of the following
+    //instruction onto the stack and RET pops that address back to the pc to return
+    CALL(JumpTest),
+    RET(JumpTest),
 }
 
 //jump can be unconditional or gated on the state of a flag. If the condition
@@ -425,7 +429,20 @@ impl Instruction {
             0xD1 => Some(Instruction::POP(StackTarget::DE)),
             0xE1 => Some(Instruction::POP(StackTarget::HL)),
             0xF1 => Some(Instruction::POP(StackTarget::AF)),
-            
+
+            //CALL a16 - call a function (opcode + 2 byte address = 3 bytes)
+            0xC4 => Some(Instruction::CALL(JumpTest::NotZero)),
+            0xCC => Some(Instruction::CALL(JumpTest::Zero)),
+            0xD4 => Some(Instruction::CALL(JumpTest::NotCarry)),
+            0xDC => Some(Instruction::CALL(JumpTest::Carry)),
+            0xCD => Some(Instruction::CALL(JumpTest::Always)),
+
+            //RET - return from a function (1 byte)
+            0xC0 => Some(Instruction::RET(JumpTest::NotZero)),
+            0xC8 => Some(Instruction::RET(JumpTest::Zero)),
+            0xD0 => Some(Instruction::RET(JumpTest::NotCarry)),
+            0xD8 => Some(Instruction::RET(JumpTest::Carry)),
+            0xC9 => Some(Instruction::RET(JumpTest::Always)),
 
             //I also need to add the remaining opcodes (LD, jumps, stack ops, etc) as I build them out
             _ => Instruction::from_byte_load(byte),
