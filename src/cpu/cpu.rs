@@ -1,4 +1,7 @@
-use crate::cpu::instruction::{ADDHLTarget, ArithmeticTarget, BitPosition, Instruction};
+use crate::cpu::instruction::{
+    ADDHLTarget, ArithmeticTarget, BitPosition, Indirect, Instruction, JumpTest, LoadByteSource,
+    LoadByteTarget, LoadType, LoadWordTarget, StackTarget,
+};
 use crate::cpu::memory_bus::MemoryBus;
 use crate::cpu::registers::Registers;
 
@@ -227,8 +230,53 @@ impl CPU {
             }
             Instruction::JPI => self.registers.hl(), 
             Instruction::LD(load_type) => self.execute_load(load_type),
+            Instruction::PUSH(target) => {
+                let value = match target {
+                    StackTarget::BC => self.registers.bc(),
+                    StackTarget::DE => self.registers.de(),
+                    StackTarget::HL => self.registers.hl(),
+                    StackTarget::AF => self.registers.af(),
+                };
+                self.push(value);
+                self.registers.pc.wrapping_add(1)
+            }
+            Instruction::POP(target) => {
+                let value = self.pop();
+                match target {
+                    StackTarget::BC => self.registers.set_bc(value),
+                    StackTarget::DE => self.registers.set_de(value),
+                    StackTarget::HL => self.registers.set_hl(value),
+                    //set_af masks off the low nibble of F, keeping those bits 0 as the hardware does
+                    StackTarget::AF => self.registers.set_af(value),
+                }
+                self.registers.pc.wrapping_add(1)
+            }
+            
         }
     }
+    //This is to push a 16 bit value onto stack. Since the game boy grows downwards
+    //we move SP down before each write and store the high byte first so after both
+    //writes the low byte sits at the lower addres(little endian)
+    fn push(&mut self, value: u16) {
+        self.registers.sp = self.registers.sp.wrapping_sub(1);
+        self.bus.write_byte(self.registers.sp, (value >> 8) as u8);
+
+        self.registers.sp = self.registers.sp.wrapping_sub(1);
+        self.bus.write_byte(self.registers.sp, value as u8);
+    }
+
+    //This is to pop a 16 bit value off the stack, the mirror image of push. The low byte is on
+    //top at the lower address, so we read it first, then the high byte, moving SP up as we go
+    fn pop(&mut self) -> u16 {
+        let low = self.bus.read_byte(self.registers.sp) as u16;
+        self.registers.sp = self.registers.sp.wrapping_add(1);
+
+        let high = self.bus.read_byte(self.registers.sp) as u16;
+        self.registers.sp = self.registers.sp.wrapping_add(1);
+
+        (high << 8) | low
+    }
+
 
     //This runs a load and returns the next program counter. Each shape of load advances
     //the pc by a different amount depending on how many bytes the opcode occupies
