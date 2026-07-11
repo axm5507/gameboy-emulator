@@ -46,6 +46,11 @@ pub enum Instruction {
     //to an immediate value baked into instruction to a place in memory.
     //LoadType accepts all the different shapes a load can take
     LD(LoadType),
+    //Now for stack stuff. PUSH writes a 16bit register pair onto it, moving SP
+    //down 2, and POP reads a pair back off, moving SP up 2. These are the
+    //building blocks for CALL and RET which will come next
+    PUSH(StackTarget),
+    POP(StackTarget),
 }
 
 //jump can be unconditional or gated on the state of a flag. If the condition
@@ -58,6 +63,16 @@ pub enum JumpTest {
     Carry,
     Always,
 }
+
+//16 bit register pairs that push and pop operate on
+#[derive(Clone, Copy)]
+pub enum StackTarget {
+    BC,
+    DE,
+    HL,
+    AF,
+}
+
 
 //The different types of load the CPU supports
 #[derive(Clone, Copy)]
@@ -398,6 +413,18 @@ impl Instruction {
 
             //JP (HL) - jump to the address held in HL (1 byte)
             0xE9 => Some(Instruction::JPI),
+            
+            //PUSH rr - push a register pair onto the stack (1 byte)
+            0xC5 => Some(Instruction::PUSH(StackTarget::BC)),
+            0xD5 => Some(Instruction::PUSH(StackTarget::DE)),
+            0xE5 => Some(Instruction::PUSH(StackTarget::HL)),
+            0xF5 => Some(Instruction::PUSH(StackTarget::AF)),
+
+            //POP rr - pop a register pair off the stack (1 byte)
+            0xC1 => Some(Instruction::POP(StackTarget::BC)),
+            0xD1 => Some(Instruction::POP(StackTarget::DE)),
+            0xE1 => Some(Instruction::POP(StackTarget::HL)),
+            0xF1 => Some(Instruction::POP(StackTarget::AF)),
             
 
             //I also need to add the remaining opcodes (LD, jumps, stack ops, etc) as I build them out
