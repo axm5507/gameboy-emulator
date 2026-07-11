@@ -33,6 +33,25 @@ pub enum Instruction {
     SRA(ArithmeticTarget),
     SLA(ArithmeticTarget),
     SWAP(ArithmeticTarget),
+    //Jumps change what the program counter does next instead of just falling
+    //through to the following instruction
+    //JP  = jump to an absolute 16 bit address that follows the opcode in memory
+    //JR  = jump relative, by a signed 8 bit offset that follows the opcode
+    //JPI = jump to the address currently held in the HL register (JP (HL))
+    JP(JumpTest),
+    JR(JumpTest),
+    JPI,
+}
+
+//jump can be unconditional or gated on the state of a flag. If the condition
+//is false, the CPU just moves past the jump to the next instruction
+#[derive(Clone, Copy)]
+pub enum JumpTest {
+    NotZero,
+    Zero,
+    NotCarry,
+    Carry,
+    Always,
 }
 
 impl Instruction {
@@ -214,6 +233,24 @@ impl Instruction {
             0x2F => Some(Instruction::CPL),
             0x37 => Some(Instruction::SCF),
             0x3F => Some(Instruction::CCF),
+
+            //JP a16 - absolute jump (opcode + 2 byte address = 3 bytes)
+            0xC2 => Some(Instruction::JP(JumpTest::NotZero)),
+            0xCA => Some(Instruction::JP(JumpTest::Zero)),
+            0xD2 => Some(Instruction::JP(JumpTest::NotCarry)),
+            0xDA => Some(Instruction::JP(JumpTest::Carry)),
+            0xC3 => Some(Instruction::JP(JumpTest::Always)),
+
+            //JR r8 - relative jump (opcode + signed 8 bit offset = 2 bytes)
+            0x20 => Some(Instruction::JR(JumpTest::NotZero)),
+            0x28 => Some(Instruction::JR(JumpTest::Zero)),
+            0x30 => Some(Instruction::JR(JumpTest::NotCarry)),
+            0x38 => Some(Instruction::JR(JumpTest::Carry)),
+            0x18 => Some(Instruction::JR(JumpTest::Always)),
+
+            //JP (HL) - jump to the address held in HL (1 byte)
+            0xE9 => Some(Instruction::JPI),
+            
 
             //I also need to add the remaining opcodes (LD, jumps, stack ops, etc) as I build them out
             _ => None,
