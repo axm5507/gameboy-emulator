@@ -1,23 +1,59 @@
 use crate::cpu::instruction::{ADDHLTarget, ArithmeticTarget, BitPosition, Instruction};
+use crate::cpu::memory_bus::MemoryBus;
 use crate::cpu::registers::Registers;
 
 pub struct CPU {
     pub registers: Registers,
+    pub bus: MemoryBus,
 }
 
 impl CPU {
     pub fn new() -> Self {
         Self {
             registers: Registers::new(),
+            bus: MemoryBus::new(),
         }
     }
-//Now to write the execute function that contains the logic for each instruction mentioned in the instructions file
-    pub fn execute(&mut self, instruction: Instruction) {
+
+
+    //if you're familiar with how a CPU works, you'll recognize this as a fetch-decode-execute
+    //cycle. First, we fetch(read the opcode byte that the program counter points at), then we
+    //decode(turn the byte into an Instruction), then we execute(run it, which also tells us where
+    //the program counter should go next), and finally, we advance by moving the program counter to
+    //the next address.
+    pub fn step(&mut self) {
+        let mut instruction_byte = self.bus.read_byte(self.registers.pc);
+
+
+        //0xcb is a prefix opcode. When the processor encounters it, it knows to read the
+        //next byte in memory and execute an extended bitwise operation. When we read the
+        //following byte we remember we're prefixed so we decode against the right table
+        //and account for the extra byte later.
+        let prefixed = instruction_byte == 0xCB;
+        if prefixed {
+            instruction_byte = self.bus.read_byte(self.registers.pc.wrapping_add(1));
+        }
+
+        let next_pc = if let Some(instruction) = Instruction::from_byte(instruction_byte, prefixed)
+        {
+            self.execute(instruction)
+        } else {
+            let description = format!("0x{}{:02x}", if prefixed { "cb" } else { "" }, instruction_byte);
+            panic!("Unknown instruction found for: {}", description);
+        };
+
+        self.registers.pc = next_pc;
+    }
+
+    //Now to write the execute function that contains the logic for each instruction mentioned in the instructions file
+    //It now returns the address the program counter should move to after this instruction
+    pub fn execute(&mut self, instruction: Instruction) -> u16 {
         match instruction {
             Instruction::ADD(target) => {
                 let value = self.get_register(target);
                 let new_value = self.add(value);
                 self.registers.a = new_value;
+                self.registers.pc.wrapping_add(1)
             }
             Instruction::ADDHL(target) => {
                 let value = match target {
@@ -28,111 +64,156 @@ impl CPU {
                 };
                 let new_value = self.add_hl(value);
                 self.registers.set_hl(new_value);
+                self.registers.pc.wrapping_add(1)
             }
             Instruction::ADC(target) => {
                 let value = self.get_register(target);
                 let new_value = self.adc(value);
                 self.registers.a = new_value;
+                self.registers.pc.wrapping_add(1)
             }
             Instruction::SUB(target) => {
                 let value = self.get_register(target);
                 let new_value = self.sub(value);
                 self.registers.a = new_value;
+                self.registers.pc.wrapping_add(1)
             }
             Instruction::SBC(target) => {
                 let value = self.get_register(target);
                 let new_value = self.sbc(value);
                 self.registers.a = new_value;
+                self.registers.pc.wrapping_add(1)
             }
             Instruction::AND(target) => {
                 let value = self.get_register(target);
                 let new_value = self.and(value);
                 self.registers.a = new_value;
+                self.registers.pc.wrapping_add(1)
             }
             Instruction::OR(target) => {
                 let value = self.get_register(target);
                 let new_value = self.or(value);
                 self.registers.a = new_value;
+                self.registers.pc.wrapping_add(1)
             }
             Instruction::XOR(target) => {
                 let value = self.get_register(target);
                 let new_value = self.xor(value);
                 self.registers.a = new_value;
+                self.registers.pc.wrapping_add(1)
             }
             Instruction::CP(target) => {
                 let value = self.get_register(target);
                 self.sub(value);
+                self.registers.pc.wrapping_add(1)
             }
             Instruction::INC(target) => {
                 let value = self.get_register(target);
                 let new_value = self.inc(value);
                 self.set_register(target, new_value);
+                self.registers.pc.wrapping_add(1)
             }
             Instruction::DEC(target) => {
                 let value = self.get_register(target);
                 let new_value = self.dec(value);
                 self.set_register(target, new_value);
+                self.registers.pc.wrapping_add(1)
             }
-            Instruction::CCF => self.ccf(),
-            Instruction::SCF => self.scf(),
-            Instruction::RRA => self.rra(),
-            Instruction::RLA => self.rla(),
-            Instruction::RRCA => self.rrca(),
-            Instruction::RLCA => self.rlca(),
-            Instruction::CPL => self.cpl(),
+            Instruction::CCF => {
+                self.ccf();
+                self.registers.pc.wrapping_add(1)
+            }
+            Instruction::SCF => {
+                self.scf();
+                self.registers.pc.wrapping_add(1)
+            }
+            Instruction::RRA => {
+                self.rra();
+                self.registers.pc.wrapping_add(1)
+            }
+            Instruction::RLA => {
+                self.rla();
+                self.registers.pc.wrapping_add(1)
+            }
+            Instruction::RRCA => {
+                self.rrca();
+                self.registers.pc.wrapping_add(1)
+            }
+            Instruction::RLCA => {
+                self.rlca();
+                self.registers.pc.wrapping_add(1)
+            }
+            Instruction::CPL => {
+                self.cpl();
+                self.registers.pc.wrapping_add(1)
+            }
+            //Everything below comes from the 0xCB prefixed table, so each of these
+            //instructions is two bytes long(0xCB prefix + opcode) and the program
+            //counter advances by 2
             Instruction::BIT(target, bit) => {
                 let value = self.get_register(target);
                 self.bit(value, bit);
+                self.registers.pc.wrapping_add(2)
             }
             Instruction::RESET(target, bit) => {
                 let value = self.get_register(target);
                 let new_value = self.reset(value, bit);
                 self.set_register(target, new_value);
+                self.registers.pc.wrapping_add(2)
             }
             Instruction::SET(target, bit) => {
                 let value = self.get_register(target);
                 let new_value = self.set_bit(value, bit);
                 self.set_register(target, new_value);
+                self.registers.pc.wrapping_add(2)
             }
             Instruction::SRL(target) => {
                 let value = self.get_register(target);
                 let new_value = self.srl(value);
                 self.set_register(target, new_value);
+                self.registers.pc.wrapping_add(2)
             }
             Instruction::RR(target) => {
                 let value = self.get_register(target);
                 let new_value = self.rr(value);
                 self.set_register(target, new_value);
+                self.registers.pc.wrapping_add(2)
             }
             Instruction::RL(target) => {
                 let value = self.get_register(target);
                 let new_value = self.rl(value);
                 self.set_register(target, new_value);
+                self.registers.pc.wrapping_add(2)
             }
             Instruction::RRC(target) => {
                 let value = self.get_register(target);
                 let new_value = self.rrc(value);
                 self.set_register(target, new_value);
+                self.registers.pc.wrapping_add(2)
             }
             Instruction::RLC(target) => {
                 let value = self.get_register(target);
                 let new_value = self.rlc(value);
                 self.set_register(target, new_value);
+                self.registers.pc.wrapping_add(2)
             }
             Instruction::SRA(target) => {
                 let value = self.get_register(target);
                 let new_value = self.sra(value);
                 self.set_register(target, new_value);
+                self.registers.pc.wrapping_add(2)
             }
             Instruction::SLA(target) => {
                 let value = self.get_register(target);
                 let new_value = self.sla(value);
                 self.set_register(target, new_value);
+                self.registers.pc.wrapping_add(2)
             }
             Instruction::SWAP(target) => {
                 let value = self.get_register(target);
                 let new_value = self.swap(value);
                 self.set_register(target, new_value);
+                self.registers.pc.wrapping_add(2)
             }
         }
     }
