@@ -41,6 +41,11 @@ pub enum Instruction {
     JP(JumpTest),
     JR(JumpTest),
     JPI,
+    //Now I'm getting to reading and writing to memory. LD copies a value from
+    //a source to a target. The source and target can be anything from a register
+    //to an immediate value baked into instruction to a place in memory.
+    //LoadType accepts all the different shapes a load can take
+    LD(LoadType),
 }
 
 //jump can be unconditional or gated on the state of a flag. If the condition
@@ -53,6 +58,70 @@ pub enum JumpTest {
     Carry,
     Always,
 }
+
+//The different types of load the CPU supports
+#[derive(Clone, Copy)]
+pub enum LoadType {
+    //8 bit load between two registers, an immediate byte, or the byte at (HL)
+    Byte(LoadByteTarget, LoadByteSource),
+    //16 bit load of an immediate word into a 16 bit register (BC/DE/HL/SP)
+    Word(LoadWordTarget),
+    //Load A from a byte in memory whose address comes from a register pair/immediate
+    AFromIndirect(Indirect),
+    //Store A into a byte in memory whose address comes from a register pair/immediate
+    IndirectFromA(Indirect),
+    //Load A from the high page: memory at 0xFF00 + an immediate byte
+    AFromByteAddress,
+    //Store A into the high page: memory at 0xFF00 + an immediate byte
+    ByteAddressFromA,
+}
+
+//HLI here means HL Indirect, or the byte in memory that HL points at
+#[derive(Clone, Copy)]
+pub enum LoadByteTarget {
+    A,
+    B,
+    C,
+    D,
+    E,
+    H,
+    L,
+    HLI,
+}
+
+#[derive(Clone, Copy)]
+pub enum LoadByteSource {
+    A,
+    B,
+    C,
+    D,
+    E,
+    H,
+    L,
+    //D8 is an immediate 8 bit value that follows the opcode in memory
+    D8,
+    HLI,
+}
+
+#[derive(Clone, Copy)]
+pub enum LoadWordTarget {
+    BC,
+    DE,
+    HL,
+    SP,
+}
+
+//These are the ways a load can name a place in memory to read A from or write A to
+#[derive(Clone, Copy)]
+pub enum Indirect {
+    BCIndirect, //address in BC
+    DEIndirect, //address in DE
+    HLIndirectPlus, //address in HL, then HL is incremented afterwards
+    HLIndirectMinus, //address in HL, then HL is decremented afterwards
+    WordIndirect, //address is an immediate 16 bit value after the opcode
+    LastByteIndirect, //address is 0xFF00 + register C
+}
+
 
 impl Instruction {
     //This code turns an opcode byte into the instruction that it represents.
@@ -126,7 +195,86 @@ impl Instruction {
         }
     }
 
+    //This decodes the LD opcodes. Like the 0xCB table, the big block of register
+    //to register loads is regular enough to decode from the bits, so
+    //we do that first and fall back to an explicit table for the irregular loads
+    fn from_byte_load(byte: u8) -> Option<Instruction> {
+        if (0x40..=0x7F).contains(&byte) && byte != 0x76 {
+            let target = Instruction::load_byte_target((byte >> 3) & 0x07);
+            let source = Instruction::load_byte_source(byte & 0x07);
+            return Some(Instruction::LD(LoadType::Byte(target, source)));
+        }
 
+        let load_type = match byte {
+            0x06 => LoadType::Byte(LoadByteTarget::B, LoadByteSource::D8),
+            0x0E => LoadType::Byte(LoadByteTarget::C, LoadByteSource::D8),
+            0x16 => LoadType::Byte(LoadByteTarget::D, LoadByteSource::D8),
+            0x1E => LoadType::Byte(LoadByteTarget::E, LoadByteSource::D8),
+            0x26 => LoadType::Byte(LoadByteTarget::H, LoadByteSource::D8),
+            0x2E => LoadType::Byte(LoadByteTarget::L, LoadByteSource::D8),
+            0x36 => LoadType::Byte(LoadByteTarget::HLI, LoadByteSource::D8),
+            0x3E => LoadType::Byte(LoadByteTarget::A, LoadByteSource::D8),
+
+            //LD rr, d16 - load an immediate word into a 16 bit register
+            0x01 => LoadType::Word(LoadWordTarget::BC),
+            0x11 => LoadType::Word(LoadWordTarget::DE),
+            0x21 => LoadType::Word(LoadWordTarget::HL),
+            0x31 => LoadType::Word(LoadWordTarget::SP),
+
+            //LD A, (indirect) - read A from a byte in memory
+            0x0A => LoadType::AFromIndirect(Indirect::BCIndirect),
+            0x1A => LoadType::AFromIndirect(Indirect::DEIndirect),
+            0x2A => LoadType::AFromIndirect(Indirect::HLIndirectPlus),
+            0x3A => LoadType::AFromIndirect(Indirect::HLIndirectMinus),
+            0xFA => LoadType::AFromIndirect(Indirect::WordIndirect),
+            0xF2 => LoadType::AFromIndirect(Indirect::LastByteIndirect),
+
+            //LD (indirect), A - write A to a byte in memory
+            0x02 => LoadType::IndirectFromA(Indirect::BCIndirect),
+            0x12 => LoadType::IndirectFromA(Indirect::DEIndirect),
+            0x22 => LoadType::IndirectFromA(Indirect::HLIndirectPlus),
+            0x32 => LoadType::IndirectFromA(Indirect::HLIndirectMinus),
+            0xEA => LoadType::IndirectFromA(Indirect::WordIndirect),
+            0xE2 => LoadType::IndirectFromA(Indirect::LastByteIndirect),
+
+            //LD A, (0xFF00 + a8) and LD (0xFF00 + a8), A - the high page loads
+            0xF0 => LoadType::AFromByteAddress,
+            0xE0 => LoadType::ByteAddressFromA,
+
+            _ => return None,
+        };
+        Some(Instruction::LD(load_type))
+    }
+
+    //This maps the 3 bit register index used by the byte loads to a load target. Index 6
+    //is (HL), unlike the arithmetic tables, loads actually do support the (HL) operand
+    fn load_byte_target(index: u8) -> LoadByteTarget {
+        match index {
+            0 => LoadByteTarget::B,
+            1 => LoadByteTarget::C,
+            2 => LoadByteTarget::D,
+            3 => LoadByteTarget::E,
+            4 => LoadByteTarget::H,
+            5 => LoadByteTarget::L,
+            6 => LoadByteTarget::HLI,
+            _ => LoadByteTarget::A,
+        }
+    }
+
+    fn load_byte_source(index: u8) -> LoadByteSource {
+        match index {
+            0 => LoadByteSource::B,
+            1 => LoadByteSource::C,
+            2 => LoadByteSource::D,
+            3 => LoadByteSource::E,
+            4 => LoadByteSource::H,
+            5 => LoadByteSource::L,
+            6 => LoadByteSource::HLI,
+            _ => LoadByteSource::A,
+        }
+    }
+
+    
     fn from_byte_not_prefixed(byte: u8) -> Option<Instruction> {
         match byte {
             //ADD A, r
@@ -253,7 +401,7 @@ impl Instruction {
             
 
             //I also need to add the remaining opcodes (LD, jumps, stack ops, etc) as I build them out
-            _ => None,
+            _ => Instruction::from_byte_load(byte),
         }
     }
 }
