@@ -251,9 +251,56 @@ impl CPU {
                 }
                 self.registers.pc.wrapping_add(1)
             }
+            Instruction::POP(target) => {
+                let value = self.pop();
+                match target {
+                    StackTarget::BC => self.registers.set_bc(value),
+                    StackTarget::DE => self.registers.set_de(value),
+                    StackTarget::HL => self.registers.set_hl(value),
+                    //set_af masks off the low nibble of F, keeping those bits 0 as
+                    //the hardware does even if a bogus value was popped in.
+                    StackTarget::AF => self.registers.set_af(value),
+                }
+                self.registers.pc.wrapping_add(1)
+            }
+            Instruction::CALL(test) => {
+                let should_jump = self.should_jump(test);
+                self.call(should_jump)
+            }
+            Instruction::RET(test) => {
+                let should_jump = self.should_jump(test);
+                self.return_(should_jump)
+            }
             
         }
     }
+
+    //This is to call a function. Its a jump that first saves where to come back to. it
+    //pushes the address of the instruction right after the CALL (pc + 3, since CALL
+    //is 3 bytes) onto the stack, then jumps to the target address that follows the
+    //opcode. If the condition fails we just step over the whole 3-byte instruction
+    fn call(&mut self, should_jump: bool) -> u16 {
+        let next_pc = self.registers.pc.wrapping_add(3);
+        if should_jump {
+            self.push(next_pc);
+            self.read_next_word()
+        } else {
+            next_pc
+        }
+    }
+
+    //This returns from a function by popping the saved return address back into the pc.
+    //If the condition fails we simply move on past the 1-byte RET
+    fn return_(&mut self, should_jump: bool) -> u16 {
+        if should_jump {
+            self.pop()
+        } else {
+            self.registers.pc.wrapping_add(1)
+        }
+    }
+
+
+    
     //This is to push a 16 bit value onto stack. Since the game boy grows downwards
     //we move SP down before each write and store the high byte first so after both
     //writes the low byte sits at the lower addres(little endian)
