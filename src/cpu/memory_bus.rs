@@ -4,6 +4,7 @@
 //array needs 0x10000 bytes.
 //we route VRAM to the GPU so it can keep its decoded tile set in sync
 use crate::gpu::{GPU, VRAM_BEGIN, VRAM_END};
+use crate::interrupts::{Interrupt, INTERRUPT_FLAG_ADDRESS};
 
 pub struct MemoryBus {
     memory: [u8; 0x10000],
@@ -15,6 +16,7 @@ impl MemoryBus {
     pub fn new() -> Self {
         Self {
             memory: [0; 0x10000],
+            gpu: GPU::new(),
         }
     }
 
@@ -36,4 +38,12 @@ impl MemoryBus {
             _ => self.memory[address] = value,
         }
     }
+    //Flag an interrupt as requested by setting its bit in the IF register. This is how
+    //hardware signals the CPU that it needs attention
+    pub fn request_interrupt(&mut self, interrupt: Interrupt) {
+        let flags = self.read_byte(INTERRUPT_FLAG_ADDRESS);
+        self.write_byte(INTERRUPT_FLAG_ADDRESS, flags | interrupt.bit());
+    }
+
+    
 }
