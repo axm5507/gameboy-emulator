@@ -1,6 +1,6 @@
 use crate::cpu::instruction::{
     ADDHLTarget, ArithmeticTarget, BitPosition, Indirect, Instruction, JumpTest, LoadByteSource,
-    LoadByteTarget, LoadType, LoadWordTarget, StackTarget,
+    LoadByteTarget, LoadType, LoadWordTarget, StackTarget, WordRegister,
 };
 use crate::cpu::memory_bus::MemoryBus;
 use crate::cpu::registers::Registers;
@@ -8,6 +8,10 @@ use crate::cpu::registers::Registers;
 pub struct CPU {
     pub registers: Registers,
     pub bus: MemoryBus,
+    //When HALT is true, the CPU is paused. In real hardware an interrupt clears this
+    //but I have yet to implement that so nothing clears it back for now
+    pub is_halted: bool,
+    
 }
 
 impl CPU {
@@ -15,6 +19,7 @@ impl CPU {
         Self {
             registers: Registers::new(),
             bus: MemoryBus::new(),
+            is_halted: false,
         }
     }
 
@@ -25,6 +30,12 @@ impl CPU {
     //the program counter should go next), and finally, we advance by moving the program counter to
     //the next address.
     pub fn step(&mut self) {
+
+        //halted cpu does nothing until interrupt wakes it, I need to implement interrupts
+        if self.is_halted{
+            return;
+        }
+  
         let mut instruction_byte = self.bus.read_byte(self.registers.pc);
 
 
@@ -56,7 +67,11 @@ impl CPU {
                 let value = self.get_register(target);
                 let new_value = self.add(value);
                 self.registers.a = new_value;
-                self.registers.pc.wrapping_add(1)
+                //self.registers.pc.wrapping_add(1)
+                //replaced the code above with the code below for ADD and a few more ops below because
+                //when they gained the d8 operand form, their length became variable so the result can
+                //also be 2 bytes now
+                self.arithmetic_next_pc(target)
             }
             Instruction::ADDHL(target) => {
                 let value = match target {
@@ -73,42 +88,42 @@ impl CPU {
                 let value = self.get_register(target);
                 let new_value = self.adc(value);
                 self.registers.a = new_value;
-                self.registers.pc.wrapping_add(1)
+                self.arithmetic_next_pc(target)
             }
             Instruction::SUB(target) => {
                 let value = self.get_register(target);
                 let new_value = self.sub(value);
                 self.registers.a = new_value;
-                self.registers.pc.wrapping_add(1)
+                self.arithmetic_next_pc(target)
             }
             Instruction::SBC(target) => {
                 let value = self.get_register(target);
                 let new_value = self.sbc(value);
                 self.registers.a = new_value;
-                self.registers.pc.wrapping_add(1)
+                self.arithmetic_next_pc(target)
             }
             Instruction::AND(target) => {
                 let value = self.get_register(target);
                 let new_value = self.and(value);
                 self.registers.a = new_value;
-                self.registers.pc.wrapping_add(1)
+                self.arithmetic_next_pc(target)
             }
             Instruction::OR(target) => {
                 let value = self.get_register(target);
                 let new_value = self.or(value);
                 self.registers.a = new_value;
-                self.registers.pc.wrapping_add(1)
+                self.arithmetic_next_pc(target)
             }
             Instruction::XOR(target) => {
                 let value = self.get_register(target);
                 let new_value = self.xor(value);
                 self.registers.a = new_value;
-                self.registers.pc.wrapping_add(1)
+                self.arithmetic_next_pc(target)
             }
             Instruction::CP(target) => {
                 let value = self.get_register(target);
                 self.sub(value);
-                self.registers.pc.wrapping_add(1)
+                self.arithmetic_next_pc(target)
             }
             Instruction::INC(target) => {
                 let value = self.get_register(target);
@@ -122,6 +137,22 @@ impl CPU {
                 self.set_register(target, new_value);
                 self.registers.pc.wrapping_add(1)
             }
+            Instruction::INC16(target) => {
+                let new_value = self.get_word_register(target).wrapping_add(1);
+                self.set_word_register(target, new_value);
+                self.registers.pc.wrapping_add(1)
+            }
+            Instruction::DEC16(target) => {
+                let new_value = self.get_word_register(target).wrapping_sub(1);
+                self.set_word_register(target, new_value);
+                self.registers.pc.wrapping_add(1)
+            }
+            Instruction::ADDSP => {
+                let offset = self.read_next_byte() as i8;
+                self.registers.sp = self.add_sp_offset(offset);
+                self.registers.pc.wrapping_add(2)
+            }
+            
             Instruction::CCF => {
                 self.ccf();
                 self.registers.pc.wrapping_add(1)
@@ -149,6 +180,28 @@ impl CPU {
             Instruction::CPL => {
                 self.cpl();
                 self.registers.pc.wrapping_add(1)
+            }
+            Instruction::DAA => {
+                self.daa();
+                self.registers.pc.wrapping_add(1)
+            }
+            Instruction::NOP => self.registers.pc.wrapping_add(1),
+            Instruction::HALT => {
+                self.is_halted = true;
+                self.registers.pc.wrapping_add(1)
+            }
+            //STOP is really a 2-byte opcode (0x10 0x00). I'm modelling it like HALT for now
+            //since I have neither the joypad nor the speed switch it interacts with
+            Instruction::STOP => {
+                self.is_halted = true;
+                self.registers.pc.wrapping_add(2)
+            }
+            //RST is a one byte call to a fixed vector: push the return address (pc + 1)
+            //and jump to the vector
+            Instruction::RST(address) => {
+                let next_pc = self.registers.pc.wrapping_add(1);
+                self.push(next_pc);
+                address
             }
             //Everything below comes from the 0xCB prefixed table, so each of these
             //instructions is two bytes long(0xCB prefix + opcode) and the program
@@ -391,6 +444,24 @@ impl CPU {
                 self.bus.write_byte(0xFF00 + offset, self.registers.a);
                 self.registers.pc.wrapping_add(2)
             }
+            LoadType::SPFromHL => {
+                self.registers.sp = self.registers.hl();
+                self.registers.pc.wrapping_add(1)
+            }
+            LoadType::IndirectFromSP => {
+                let address = self.read_next_word();
+                let sp = self.registers.sp;
+                //write SP out little endian. low byte first, then high byte
+                self.bus.write_byte(address, sp as u8);
+                self.bus.write_byte(address.wrapping_add(1), (sp >> 8) as u8);
+                self.registers.pc.wrapping_add(3)
+            }
+            LoadType::HLFromSPPlus => {
+                let offset = self.read_next_byte() as i8;
+                let value = self.add_sp_offset(offset);
+                self.registers.set_hl(value);
+                self.registers.pc.wrapping_add(2)
+            }
         }
     }
 
@@ -496,6 +567,9 @@ impl CPU {
             ArithmeticTarget::E => self.registers.e,
             ArithmeticTarget::H => self.registers.h,
             ArithmeticTarget::L => self.registers.l,
+            //(HL) reads the byte HL points at and D8 reads the immediate byte after the opcode
+            ArithmeticTarget::HLI => self.bus.read_byte(self.registers.hl()),
+            ArithmeticTarget::D8 => self.read_next_byte(),
         }
     }
 
@@ -508,7 +582,86 @@ impl CPU {
             ArithmeticTarget::E => self.registers.e = value,
             ArithmeticTarget::H => self.registers.h = value,
             ArithmeticTarget::L => self.registers.l = value,
+            //(HL) writes back to the byte HL points at. Writing to D8 is meaningless because
+            //an immediate is never a destination so no instruction ever reaches it
+            ArithmeticTarget::HLI => self.bus.write_byte(self.registers.hl(), value),
+            ArithmeticTarget::D8 => unreachable!("an immediate byte is never a write target"),
         }
+    }
+    //This is how far the pc advances after an accumulator ALU op, it
+    //depends only on whether the operand was an immediate byte or not
+    fn arithmetic_next_pc(&self, target: ArithmeticTarget) -> u16 {
+        match target {
+            ArithmeticTarget::D8 => self.registers.pc.wrapping_add(2),
+            _ => self.registers.pc.wrapping_add(1),
+        }
+    }
+
+    fn get_word_register(&self, target: WordRegister) -> u16 {
+        match target {
+            WordRegister::BC => self.registers.bc(),
+            WordRegister::DE => self.registers.de(),
+            WordRegister::HL => self.registers.hl(),
+            WordRegister::SP => self.registers.sp,
+        }
+    }
+
+    fn set_word_register(&mut self, target: WordRegister, value: u16) {
+        match target {
+            WordRegister::BC => self.registers.set_bc(value),
+            WordRegister::DE => self.registers.set_de(value),
+            WordRegister::HL => self.registers.set_hl(value),
+            WordRegister::SP => self.registers.sp = value,
+        }
+    }
+
+    //This adds a signed byte to SP and computes the flags the way the hardware does.
+    //both the half carry and carry come from adding unsigned low byte of SP to the 
+    //offset byte while the actual result uses the sign extended offset
+    fn add_sp_offset(&mut self, offset: i8) -> u16 {
+        let sp = self.registers.sp;
+        let offset_byte = offset as u8 as u16; // raw unsigned byte
+        self.registers.set_zero(false);
+        self.registers.set_subtract(false);
+        self.registers
+            .set_half_carry((sp & 0x0F) + (offset_byte & 0x0F) > 0x0F);
+        self.registers.set_carry((sp & 0xFF) + (offset_byte & 0xFF) > 0xFF);
+        //offset as u16 sign extends the i8 so the result can handle negative offsets
+        sp.wrapping_add(offset as u16)
+    }
+
+    //DAA adjusts A into a valid binary coded decimal result after an add or subtract,
+    //using the subtract/half-carry/carry flags left behind by that operation
+    fn daa(&mut self) {
+        let mut a = self.registers.a;
+        let mut carry = self.registers.carry();
+        let mut adjust = 0u8;
+
+        //A half carry or low nibble that overflowed 9 during an add needs +/- 0x06
+        if self.registers.half_carry()
+            || (!self.registers.subtract() && (a & 0x0F) > 0x09)
+        {
+            adjust |= 0x06;
+        }
+        //A carry or value that overflowed 0x99 during an add needs +/- 0x60, and
+        //that sets carry flag for the result
+        if carry || (!self.registers.subtract() && a > 0x99) {
+            adjust |= 0x60;
+            carry = true;
+        }
+
+        //After a subtract we undo the adjustment and after an add we apply it
+        a = if self.registers.subtract() {
+            a.wrapping_sub(adjust)
+        } else {
+            a.wrapping_add(adjust)
+        };
+
+        self.registers.a = a;
+        self.registers.set_zero(a == 0);
+        self.registers.set_half_carry(false);
+        self.registers.set_carry(carry);
+        //the subtract (N) flag is left as it was
     }
 
     fn add(&mut self, value: u8) -> u8 {
