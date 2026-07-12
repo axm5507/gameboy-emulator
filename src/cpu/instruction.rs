@@ -15,6 +15,12 @@ pub enum Instruction {
     CP(ArithmeticTarget),
     INC(ArithmeticTarget),
     DEC(ArithmeticTarget),
+    //adding 16 bit increment/decrements of a register pair
+    //unlike 8bit INC/DEC, these don't touch any flags
+    INC16(WordRegister),
+    DEC16(WordRegister),
+    //adds sp, 48 adds signed byte to stack pointer to reserve stack space
+    ADDSP,
     CCF,
     SCF,
     RRA,
@@ -22,6 +28,15 @@ pub enum Instruction {
     RRCA,
     RLCA,
     CPL,
+    //daa adjusts A into a valid binary coded decimal value after add/subtract
+    DAA,
+    //nop only advances pc, halt pauses cpu until interrupt wakes it up,
+    //stop is a deeper sleep until a button press
+    NOP,
+    HALT,
+    STOP,
+    //rst calls one of 8 fixed low addresses
+    RST(u16),
     BIT(ArithmeticTarget, BitPosition),
     RESET(ArithmeticTarget, BitPosition),
     SET(ArithmeticTarget, BitPosition),
@@ -93,6 +108,12 @@ pub enum LoadType {
     AFromByteAddress,
     //Store A into the high page: memory at 0xFF00 + an immediate byte
     ByteAddressFromA,
+    //LD SP, HL. copy HL into stack ptr
+    SPFromHL,
+    //LD(a16), SP. write 16 bit SP out to immediate memory address
+    IndirectFromSP,
+    //LD HL, SP + r8. load HL with SP plus a signed byte
+    HLFromSPPlus,
 }
 
 //HLI here means HL Indirect, or the byte in memory that HL points at
@@ -184,17 +205,16 @@ impl Instruction {
     //This decodes the low 3 bits of a 0xCB opcode into a register target. Index 6 
     //is the (HL) memory operand, which needs a memory access we haven't built yet,
     //so we return None for it for now
-    fn prefixed_target(byte: u8) -> Option<ArithmeticTarget> {
+    fn prefixed_target(byte: u8) -> ArithmeticTarget {
         match byte & 0x07 {
-            0 => Some(ArithmeticTarget::B),
-            1 => Some(ArithmeticTarget::C),
-            2 => Some(ArithmeticTarget::D),
-            3 => Some(ArithmeticTarget::E),
-            4 => Some(ArithmeticTarget::H),
-            5 => Some(ArithmeticTarget::L),
-            7 => Some(ArithmeticTarget::A),
-            //6 => (HL) for later
-            _ => None,
+            0 => ArithmeticTarget::B,
+            1 => ArithmeticTarget::C,
+            2 => ArithmeticTarget::D,
+            3 => ArithmeticTarget::E,
+            4 => ArithmeticTarget::H,
+            5 => ArithmeticTarget::L,
+            6 => ArithmeticTarget::HLI,
+            _ => ArithmeticTarget::A,
         }
     }
 
@@ -259,7 +279,11 @@ impl Instruction {
             //LD A, (0xFF00 + a8) and LD (0xFF00 + a8), A - the high page loads
             0xF0 => LoadType::AFromByteAddress,
             0xE0 => LoadType::ByteAddressFromA,
-
+            //Stack pointer loads
+            0xF9 => LoadType::SPFromHL, //LD SP, HL 1 byte
+            0x08 => LoadType::IndirectFromSP, //LD (a16), SP 3 bytes
+            0xF8 => LoadType::HLFromSPPlus,   //LD HL, SP + r8 2 bytes
+            
             _ => return None,
         };
         Some(Instruction::LD(load_type))
@@ -374,6 +398,26 @@ impl Instruction {
             0xBD => Some(Instruction::CP(ArithmeticTarget::L)),
             0xBF => Some(Instruction::CP(ArithmeticTarget::A)),
 
+            //ALU op A, (HL), the same operations but with the byte HL points at
+            0x86 => Some(Instruction::ADD(ArithmeticTarget::HLI)),
+            0x8E => Some(Instruction::ADC(ArithmeticTarget::HLI)),
+            0x96 => Some(Instruction::SUB(ArithmeticTarget::HLI)),
+            0x9E => Some(Instruction::SBC(ArithmeticTarget::HLI)),
+            0xA6 => Some(Instruction::AND(ArithmeticTarget::HLI)),
+            0xAE => Some(Instruction::XOR(ArithmeticTarget::HLI)),
+            0xB6 => Some(Instruction::OR(ArithmeticTarget::HLI)),
+            0xBE => Some(Instruction::CP(ArithmeticTarget::HLI)),
+
+            //ALU op A, d8, the same operations but with an immediate byte (2 bytes)
+            0xC6 => Some(Instruction::ADD(ArithmeticTarget::D8)),
+            0xCE => Some(Instruction::ADC(ArithmeticTarget::D8)),
+            0xD6 => Some(Instruction::SUB(ArithmeticTarget::D8)),
+            0xDE => Some(Instruction::SBC(ArithmeticTarget::D8)),
+            0xE6 => Some(Instruction::AND(ArithmeticTarget::D8)),
+            0xEE => Some(Instruction::XOR(ArithmeticTarget::D8)),
+            0xF6 => Some(Instruction::OR(ArithmeticTarget::D8)),
+            0xFE => Some(Instruction::CP(ArithmeticTarget::D8)),
+
             //INC r (8 bit)
             0x04 => Some(Instruction::INC(ArithmeticTarget::B)),
             0x0C => Some(Instruction::INC(ArithmeticTarget::C)),
@@ -382,6 +426,7 @@ impl Instruction {
             0x24 => Some(Instruction::INC(ArithmeticTarget::H)),
             0x2C => Some(Instruction::INC(ArithmeticTarget::L)),
             0x3C => Some(Instruction::INC(ArithmeticTarget::A)),
+            0x34 => Some(Instruction::INC(ArithmeticTarget::HLI)),   
 
             //DEC r (8 bit)
             0x05 => Some(Instruction::DEC(ArithmeticTarget::B)),
@@ -391,7 +436,37 @@ impl Instruction {
             0x25 => Some(Instruction::DEC(ArithmeticTarget::H)),
             0x2D => Some(Instruction::DEC(ArithmeticTarget::L)),
             0x3D => Some(Instruction::DEC(ArithmeticTarget::A)),
+            0x35 => Some(Instruction::DEC(ArithmeticTarget::HLI)),
 
+            //INC rr/DEC rr(16 bit), no flags affected
+            0x03 => Some(Instruction::INC16(WordRegister::BC)),
+            0x13 => Some(Instruction::INC16(WordRegister::DE)),
+            0x23 => Some(Instruction::INC16(WordRegister::HL)),
+            0x33 => Some(Instruction::INC16(WordRegister::SP)),
+            0x0B => Some(Instruction::DEC16(WordRegister::BC)),
+            0x1B => Some(Instruction::DEC16(WordRegister::DE)),
+            0x2B => Some(Instruction::DEC16(WordRegister::HL)),
+            0x3B => Some(Instruction::DEC16(WordRegister::SP)),
+
+            //ADD SP, r8, add a signed byte to SP (2 bytes)
+            0xE8 => Some(Instruction::ADDSP),
+
+            //Control ops
+            0x00 => Some(Instruction::NOP),
+            0x76 => Some(Instruction::HALT),
+            0x10 => Some(Instruction::STOP),
+            0x27 => Some(Instruction::DAA),
+
+            //RST n, one byte call to a fixed restart vector
+            0xC7 => Some(Instruction::RST(0x00)),
+            0xCF => Some(Instruction::RST(0x08)),
+            0xD7 => Some(Instruction::RST(0x10)),
+            0xDF => Some(Instruction::RST(0x18)),
+            0xE7 => Some(Instruction::RST(0x20)),
+            0xEF => Some(Instruction::RST(0x28)),
+            0xF7 => Some(Instruction::RST(0x30)),
+            0xFF => Some(Instruction::RST(0x38)),
+        
             //Single-byte accumulator/flag operations
             0x07 => Some(Instruction::RLCA),
             0x0F => Some(Instruction::RRCA),
@@ -444,7 +519,6 @@ impl Instruction {
             0xD8 => Some(Instruction::RET(JumpTest::Carry)),
             0xC9 => Some(Instruction::RET(JumpTest::Always)),
 
-            //I also need to add the remaining opcodes (LD, jumps, stack ops, etc) as I build them out
             _ => Instruction::from_byte_load(byte),
         }
     }
@@ -460,11 +534,25 @@ pub enum ArithmeticTarget {
     E,
     H,
     L,
+    //HLI is the byte in memory that HL points at, (HL) operand shared by ALU ops, INC/DEC, and 
+    //the whole 0xCB table
+    HLI, 
+    //D8 is an immediate byte that follows the opcode used by A, d8, ALU ops
+    D8,
 }
 
 //ADDHL adds a 16 bit register pair into HL, so it needs its own target list instead of ArithmeticTarget
 #[derive(Clone, Copy)]
 pub enum ADDHLTarget {
+    BC,
+    DE,
+    HL,
+    SP,
+}
+
+//The 16 bit register pairs that the 16 bit INC/DEC instructions operate on
+#[derive(Clone, Copy)]
+pub enum WordRegister {
     BC,
     DE,
     HL,
