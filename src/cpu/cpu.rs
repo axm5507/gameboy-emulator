@@ -4,6 +4,7 @@ use crate::cpu::instruction::{
 };
 use crate::cpu::memory_bus::MemoryBus;
 use crate::cpu::registers::Registers;
+use crate::interrupts::{INTERRUPT_ENABLE_ADDRESS, INTERRUPT_FLAG_ADDRESS, Interrupt};
 
 pub struct CPU {
     pub registers: Registers,
@@ -11,6 +12,12 @@ pub struct CPU {
     //When HALT is true, the CPU is paused. In real hardware an interrupt clears this
     //but I have yet to implement that so nothing clears it back for now
     pub is_halted: bool,
+    //the IME is the interrupt master enable, which is a switch that gates whether any 
+    //interrupt gets serviced. Its toggled by DI, EI, or RETI
+    pub ime: bool,
+    //EI enables interrupts one instruction late so it schedules enable here and 
+    //step() applies it after the following instruction runs
+    ime_pending: bool,
     
 }
 
@@ -20,6 +27,8 @@ impl CPU {
             registers: Registers::new(),
             bus: MemoryBus::new(),
             is_halted: false,
+            ime: false,
+            ime_pending: false,
         }
     }
 
@@ -31,13 +40,28 @@ impl CPU {
     //the next address.
     //I now made it so it returns the number of T cycles(4.19 MHz clock ticks) the instruction took,
     //which is what the rest of the stuff I am going to implement(PPU, timer) will be clocked against
-    pub fn step(&mut self) {
+    pub fn step(&mut self) -> u8 {
+        let pending = self.pending_interrupt();
 
-        //halted cpu does nothing until interrupt wakes it, I need to implement interrupts
-        if self.is_halted{
-            return 4;
+        //halted cpu does nothing until interrupt wakes it
+        if self.is_halted {
+            if pending.is_some() {
+                self.is_halted = false;
+            } else {
+                return 4;
+            }
         }
-  
+
+        //if interrupts are globally enabled and one is pending, service it
+        if self.ime {
+            if let Some(interrupt) = pending {
+                return self.service_interrupt(interrupt);
+            }
+        }
+
+        //An EI on previous step enables IME after the following instruction. 
+        let enable_ime_after = self.ime_pending;
+        
         let mut instruction_byte = self.bus.read_byte(self.registers.pc);
 
 
@@ -64,7 +88,43 @@ impl CPU {
             };
 
         self.registers.pc = next_pc;
+
+        //Apply the delayed EI. The self.ime_pending recheck means a DI executed in
+        //this same slot correctly wins over the pending EI
+        if enable_ime_after && self.ime_pending {
+            self.ime = true;
+            self.ime_pending = false;
+        }
+        
         cycles
+    }
+
+    //This finds the highest priority interrupt that is both enabled(IE) and requested(IF),
+    //or None if there is nothing to service
+    fn pending_interrupt(&self) -> Option<Interrupt> {
+        let enabled = self.bus.read_byte(INTERRUPT_ENABLE_ADDRESS);
+        let requested = self.bus.read_byte(INTERRUPT_FLAG_ADDRESS);
+        let active = enabled & requested;
+        if active == 0 {
+            return None;
+        }
+        Interrupt::PRIORITY
+            .into_iter()
+            .find(|interrupt| active & interrupt.bit() != 0)
+    }
+
+    //This services an interrupt. turn off IME(so the handler runs uninterrupted until it
+    //chooses otherwise), clear this interrupt's request bit so it isn't handled twice,
+    //then push the current pc and jump to the vector. The whole sequence costs 20 T-cycles
+    fn service_interrupt(&mut self, interrupt: Interrupt) -> u8 {
+        self.ime = false;
+        let flags = self.bus.read_byte(INTERRUPT_FLAG_ADDRESS);
+        self.bus
+            .write_byte(INTERRUPT_FLAG_ADDRESS, flags & !interrupt.bit());
+
+        self.push(self.registers.pc);
+        self.registers.pc = interrupt.vector();
+        20
     }
 
     //This is for how many T cycles an instruction takes. Most are fixed by the opcode, but a few
@@ -452,6 +512,23 @@ impl CPU {
             Instruction::RET(test) => {
                 let should_jump = self.should_jump(test);
                 self.return_(should_jump)
+            }
+            //DI disables interrupts immediately and cancels any EI still waiting
+            //to take effect
+            Instruction::DI => {
+                self.ime = false;
+                self.ime_pending = false;
+                self.registers.pc.wrapping_add(1)
+            }
+            //EI schedules the enable, which step() applies after the following instruction
+            Instruction::EI => {
+                self.ime_pending = true;
+                self.registers.pc.wrapping_add(1)
+            }
+            //RETI is RET plus an immediate re enable of interrupts
+            Instruction::RETI => {
+                self.ime = true;
+                self.pop()
             }
             
         }
