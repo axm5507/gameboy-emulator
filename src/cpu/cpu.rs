@@ -29,11 +29,13 @@ impl CPU {
     //decode(turn the byte into an Instruction), then we execute(run it, which also tells us where
     //the program counter should go next), and finally, we advance by moving the program counter to
     //the next address.
+    //I now made it so it returns the number of T cycles(4.19 MHz clock ticks) the instruction took,
+    //which is what the rest of the stuff I am going to implement(PPU, timer) will be clocked against
     pub fn step(&mut self) {
 
         //halted cpu does nothing until interrupt wakes it, I need to implement interrupts
         if self.is_halted{
-            return;
+            return 4;
         }
   
         let mut instruction_byte = self.bus.read_byte(self.registers.pc);
@@ -48,17 +50,144 @@ impl CPU {
             instruction_byte = self.bus.read_byte(self.registers.pc.wrapping_add(1));
         }
 
-        let next_pc = if let Some(instruction) = Instruction::from_byte(instruction_byte, prefixed)
-        {
-            self.execute(instruction)
-        } else {
-            let description = format!("0x{}{:02x}", if prefixed { "cb" } else { "" }, instruction_byte);
-            panic!("Unknown instruction found for: {}", description);
-        };
+        let (next_pc, cycles) =
+            if let Some(instruction) = Instruction::from_byte(instruction_byte, prefixed) {
+                //Work out the timing before executing. The only instructions whose cost
+                //depends on runtime state are conditional branches, and those don't touch
+                //the flags they test, so measuring first gives the same answer
+                let cycles = self.instruction_cycles(instruction);
+                (self.execute(instruction), cycles)
+            } else {
+                let description =
+                    format!("0x{}{:02x}", if prefixed { "cb" } else { "" }, instruction_byte);
+                panic!("Unknown instruction found for: {}", description);
+            };
 
         self.registers.pc = next_pc;
+        cycles
     }
 
+    //This is for how many T cycles an instruction takes. Most are fixed by the opcode, but a few
+    //vary. (HL)/immediate operands are slower than register operands, and conditional branches
+    //cost more when the branch is actually taken
+    fn instruction_cycles(&self, instruction: Instruction) -> u8 {
+        match instruction {
+            //Accumulator ALU: 4 for a register operand, 8 for (HL) or an immediate byte
+            Instruction::ADD(t)
+            | Instruction::ADC(t)
+            | Instruction::SUB(t)
+            | Instruction::SBC(t)
+            | Instruction::AND(t)
+            | Instruction::OR(t)
+            | Instruction::XOR(t)
+            | Instruction::CP(t) => match t {
+                ArithmeticTarget::HLI | ArithmeticTarget::D8 => 8,
+                _ => 4,
+            },
+            Instruction::ADDHL(_) => 8,
+            //8bit INC/DEC, 4 on a register, 12 on (HL) (read, modify, write back)
+            Instruction::INC(t) | Instruction::DEC(t) => match t {
+                ArithmeticTarget::HLI => 12,
+                _ => 4,
+            },
+            Instruction::INC16(_) | Instruction::DEC16(_) => 8,
+            Instruction::ADDSP => 16,
+            Instruction::CCF
+            | Instruction::SCF
+            | Instruction::CPL
+            | Instruction::DAA
+            | Instruction::RRA
+            | Instruction::RLA
+            | Instruction::RRCA
+            | Instruction::RLCA
+            | Instruction::NOP
+            | Instruction::HALT
+            | Instruction::STOP => 4,
+            Instruction::RST(_) => 16,
+            //CB ops, 8 on a register, 16 on (HL). BIT is the exception, it only reads and
+            //never writes back, so BIT b, (HL) is 12 rather than 16
+            Instruction::BIT(t, _) => match t {
+                ArithmeticTarget::HLI => 12,
+                _ => 8,
+            },
+            Instruction::RESET(t, _)
+            | Instruction::SET(t, _)
+            | Instruction::SRL(t)
+            | Instruction::RR(t)
+            | Instruction::RL(t)
+            | Instruction::RRC(t)
+            | Instruction::RLC(t)
+            | Instruction::SRA(t)
+            | Instruction::SLA(t)
+            | Instruction::SWAP(t) => match t {
+                ArithmeticTarget::HLI => 16,
+                _ => 8,
+            },
+            //For jumps and calls the taken path costs more than falling through
+            Instruction::JP(test) => {
+                if self.should_jump(test) {
+                    16
+                } else {
+                    12
+                }
+            }
+            Instruction::JR(test) => {
+                if self.should_jump(test) {
+                    12
+                } else {
+                    8
+                }
+            }
+            Instruction::JPI => 4,
+            Instruction::CALL(test) => {
+                if self.should_jump(test) {
+                    24
+                } else {
+                    12
+                }
+            }
+            //Unconditional RET (0xC9) is 16. a conditional RET is 20 taken/8 not taken
+            Instruction::RET(test) => match test {
+                JumpTest::Always => 16,
+                _ => {
+                    if self.should_jump(test) {
+                        20
+                    } else {
+                        8
+                    }
+                }
+            },
+            Instruction::PUSH(_) => 16,
+            Instruction::POP(_) => 12,
+            Instruction::LD(load_type) => Self::load_cycles(load_type),
+        }
+    }
+
+    //Timing for the load family, I split out since there are so many shapes
+    fn load_cycles(load_type: LoadType) -> u8 {
+        match load_type {
+            LoadType::Byte(target, source) => match (target, source) {
+                (LoadByteTarget::HLI, LoadByteSource::D8) => 12, // LD (HL), d8
+                (LoadByteTarget::HLI, _) => 8, // LD (HL), r
+                (_, LoadByteSource::HLI) => 8, // LD r, (HL)
+                (_, LoadByteSource::D8) => 8, // LD r, d8
+                _ => 4, // LD r, r'
+            },
+            LoadType::Word(_) => 12,
+            //Register pair indirects are 8 and going through a full 16 bit address is 16
+            LoadType::AFromIndirect(indirect) | LoadType::IndirectFromA(indirect) => match indirect {
+                Indirect::WordIndirect => 16,
+                _ => 8,
+            },
+            LoadType::AFromByteAddress | LoadType::ByteAddressFromA => 12,
+            LoadType::SPFromHL => 8,
+            LoadType::IndirectFromSP => 20,
+            LoadType::HLFromSPPlus => 12,
+        }
+    }
+
+
+    
     //Now to write the execute function that contains the logic for each instruction mentioned in the instructions file
     //It now returns the address the program counter should move to after this instruction
     pub fn execute(&mut self, instruction: Instruction) -> u16 {
