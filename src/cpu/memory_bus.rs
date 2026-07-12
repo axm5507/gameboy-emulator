@@ -2,11 +2,12 @@
 //The Game Boy has a 16 bit address space, so addresses run from 0x0000 to 0xFFFF
 //inclusive. That is 0x10000 (65,536) distinct addresses, which means the backing
 //array needs 0x10000 bytes.
-//I'm keeping this simple for now on purpose, with it being just a flat block of RAM. Later
-//this is where cartridge ROM, video memory, I/O registers, and other stuff will get 
-//mapped into their proper regions of the address space.
+//we route VRAM to the GPU so it can keep its decoded tile set in sync
+use crate::gpu::{GPU, VRAM_BEGIN, VRAM_END};
+
 pub struct MemoryBus {
     memory: [u8; 0x10000],
+    pub gpu: GPU,
 }
 
 impl MemoryBus {
@@ -18,10 +19,21 @@ impl MemoryBus {
     }
 
     pub fn read_byte(&self, address: u16) -> u8 {
-        self.memory[address as usize]
+        let address = address as usize;
+        match address {
+            //VRAM reads come from the GPU. The GPU works in VRAM relative indices, so
+            //we subtract the base address before handing it over
+            VRAM_BEGIN..=VRAM_END => self.gpu.read_vram(address - VRAM_BEGIN),
+            _ => self.memory[address],
+        }
     }
 
     pub fn write_byte(&mut self, address: u16, value: u8) {
-        self.memory[address as usize] = value;
+        let address = address as usize;
+        match address {
+            //VRAM writes go to the GPU, which also updates its cached tile set
+            VRAM_BEGIN..=VRAM_END => self.gpu.write_vram(address - VRAM_BEGIN, value),
+            _ => self.memory[address] = value,
+        }
     }
 }
