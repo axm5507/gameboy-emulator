@@ -3,6 +3,9 @@
 //and then we need to define the targets for those instructions. some instructions
 //operate on 8 bit registers, some operate on 16 bit register pairs, and some
 //operate on a single bit of a register.
+
+//copy so I can both time an instruction and execute it without moving it twice
+#[derive(Clone, Copy)]
 pub enum Instruction {
     ADD(ArithmeticTarget),
     ADDHL(ADDHLTarget),
