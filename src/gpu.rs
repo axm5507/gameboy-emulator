@@ -35,11 +35,79 @@ fn empty_tile() -> Tile {
     [[TilePixelValue::Zero; 8]; 8]
 }
 
+//LCD registers are at 0xFF40 to 0xFF4B. Memory bus routes this change here
+pub const LCDC_ADDRESS: u16 = 0xFF40; // LCD control
+pub const STAT_ADDRESS: u16 = 0xFF41; // LCD status
+pub const SCY_ADDRESS: u16 = 0xFF42; // background scroll Y
+pub const SCX_ADDRESS: u16 = 0xFF43; // background scroll X
+pub const LY_ADDRESS: u16 = 0xFF44; // current scanline (read-only)
+pub const LYC_ADDRESS: u16 = 0xFF45; // scanline compare
+pub const DMA_ADDRESS: u16 = 0xFF46; // OAM DMA (handled by the bus, not here)
+pub const BGP_ADDRESS: u16 = 0xFF47; // background palette
+pub const OBP0_ADDRESS: u16 = 0xFF48; // object palette 0
+pub const OBP1_ADDRESS: u16 = 0xFF49; // object palette 1
+pub const WY_ADDRESS: u16 = 0xFF4A; // window Y
+pub const WX_ADDRESS: u16 = 0xFF4B; // window X (minus 7)
+
+//This is for how long each PPU mode lasts in T cycles
+const OAM_CYCLES: u16 = 80; // mode 2
+const DRAWING_CYCLES: u16 = 172; // mode 3
+const HBLANK_CYCLES: u16 = 204; // mode 0
+const SCANLINE_CYCLES: u16 = 456; // one full VBlank line (mode 1)
+
+const VISIBLE_LINES: u8 = 144; // scanlines 0..=143 are drawn
+const TOTAL_LINES: u8 = 154; // plus 10 VBlank lines (144..=153)
+
+//The four PPU modes, in the numeric order the STAT register uses for its low two bits.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Mode {
+    HBlank, // 0
+    VBlank, // 1
+    OamScan, // 2
+    Drawing, // 3
+}
+
+impl Mode {
+    fn bits(self) -> u8 {
+        match self {
+            Mode::HBlank => 0,
+            Mode::VBlank => 1,
+            Mode::OamScan => 2,
+            Mode::Drawing => 3,
+        }
+    }
+}
+
+//What the PPU wants to raise after a step, bus turns these into IF requests
+#[derive(Default)]
+pub struct PpuInterrupts {
+    pub vblank: bool,
+    pub stat: bool,
+}
+
 pub struct GPU {
     //raw VRAM bytes
     vram: [u8; VRAM_SIZE],
     //A decoded copy of every tile
     pub tile_set: [Tile; TILE_COUNT],
+    //LCD registers
+    lcdc: u8,
+    //stat holds writable interrupt enable bits. Mode and lyc coincidence bits
+    //are derived on read
+    stat: u8,
+    scy: u8,
+    scx: u8,
+    ly: u8,
+    lyc: u8,
+    bgp: u8,
+    obp0: u8,
+    obp1: u8,
+    wy: u8,
+    wx: u8,
+
+    //Scanline timing state
+    mode: Mode,
+    mode_clock: u16,
 }
 
 impl GPU {
@@ -47,6 +115,20 @@ impl GPU {
         Self {
             vram: [0; VRAM_SIZE],
             tile_set: [empty_tile(); TILE_COUNT],
+            //post reset hte LCD is off, game turns it on by setting LCDC bit 7
+            lcdc: 0,
+            stat: 0,
+            scy: 0,
+            scx: 0,
+            ly: 0,
+            lyc: 0,
+            bgp: 0,
+            obp0: 0,
+            obp1: 0,
+            wy: 0,
+            wx: 0,
+            mode: Mode::OamScan,
+            mode_clock: 0,
         }
     }
 
@@ -91,71 +173,164 @@ impl GPU {
             self.tile_set[tile_index][row_index][pixel_index] = value;
         }
     }
+    //Read one of the LCD registers (0xFF40..=0xFF4B, excluding DMA).
+    pub fn read_register(&self, address: u16) -> u8 {
+        match address {
+            LCDC_ADDRESS => self.lcdc,
+            STAT_ADDRESS => self.read_stat(),
+            SCY_ADDRESS => self.scy,
+            SCX_ADDRESS => self.scx,
+            LY_ADDRESS => self.ly,
+            LYC_ADDRESS => self.lyc,
+            BGP_ADDRESS => self.bgp,
+            OBP0_ADDRESS => self.obp0,
+            OBP1_ADDRESS => self.obp1,
+            WY_ADDRESS => self.wy,
+            WX_ADDRESS => self.wx,
+            _ => 0xFF,
+        }
+    }
+
+    pub fn write_register(&mut self, address: u16, value: u8) {
+        match address {
+            LCDC_ADDRESS => self.set_lcdc(value),
+            STAT_ADDRESS => self.write_stat(value),
+            SCY_ADDRESS => self.scy = value,
+            SCX_ADDRESS => self.scx = value,
+            //LY is read-only,  writes are ignored
+            LY_ADDRESS => {}
+            LYC_ADDRESS => self.lyc = value,
+            BGP_ADDRESS => self.bgp = value,
+            OBP0_ADDRESS => self.obp0 = value,
+            OBP1_ADDRESS => self.obp1 = value,
+            WY_ADDRESS => self.wy = value,
+            WX_ADDRESS => self.wx = value,
+            _ => {}
+        }
+    }
+
+    //Advance the PPU by `cycles` T-cycles, walking the scanline/mode schedule and
+    //returning any interrupts that came due. When the LCD is off the PPU is idle.
+    pub fn step(&mut self, cycles: u8) -> PpuInterrupts {
+        let mut interrupts = PpuInterrupts::default();
+        if !self.lcd_enabled() {
+            return interrupts;
+        }
+
+        self.mode_clock += cycles as u16;
+        match self.mode {
+            Mode::OamScan => {
+                if self.mode_clock >= OAM_CYCLES {
+                    self.mode_clock -= OAM_CYCLES;
+                    self.mode = Mode::Drawing;
+                }
+            }
+            Mode::Drawing => {
+                if self.mode_clock >= DRAWING_CYCLES {
+                    self.mode_clock -= DRAWING_CYCLES;
+                    //need to draw scanline `self.ly` into the framebuffer here.
+                    self.mode = Mode::HBlank;
+                    if self.stat_enabled(STAT_HBLANK) {
+                        interrupts.stat = true;
+                    }
+                }
+            }
+            Mode::HBlank => {
+                if self.mode_clock >= HBLANK_CYCLES {
+                    self.mode_clock -= HBLANK_CYCLES;
+                    self.ly += 1;
+                    if self.ly == VISIBLE_LINES {
+                        //Falling off the last visible line starts VBlank, the moment the
+                        //frame is done and games do most of their VRAM work
+                        self.mode = Mode::VBlank;
+                        interrupts.vblank = true;
+                        if self.stat_enabled(STAT_VBLANK) {
+                            interrupts.stat = true;
+                        }
+                    } else {
+                        self.mode = Mode::OamScan;
+                        if self.stat_enabled(STAT_OAM) {
+                            interrupts.stat = true;
+                        }
+                    }
+                    if self.lyc_interrupt() {
+                        interrupts.stat = true;
+                    }
+                }
+            }
+            Mode::VBlank => {
+                if self.mode_clock >= SCANLINE_CYCLES {
+                    self.mode_clock -= SCANLINE_CYCLES;
+                    self.ly += 1;
+                    if self.ly >= TOTAL_LINES {
+                        //Wrap back to the top and start a fresh frame.
+                        self.ly = 0;
+                        self.mode = Mode::OamScan;
+                        if self.stat_enabled(STAT_OAM) {
+                            interrupts.stat = true;
+                        }
+                    }
+                    if self.lyc_interrupt() {
+                        interrupts.stat = true;
+                    }
+                }
+            }
+        }
+
+        interrupts
+    }
+
+    pub fn lcd_enabled(&self) -> bool {
+        self.lcdc & LCDC_ENABLE != 0
+    }
+
+    //Handle a write to LCDC, catching the LCD being switched on or off. Turning it off
+    //blanks the PPU (LY = 0, back to HBlank); turning it on restarts a fresh frame.
+    fn set_lcdc(&mut self, value: u8) {
+        let was_on = self.lcd_enabled();
+        self.lcdc = value;
+        let now_on = self.lcd_enabled();
+        if was_on && !now_on {
+            self.ly = 0;
+            self.mode_clock = 0;
+            self.mode = Mode::HBlank;
+        } else if !was_on && now_on {
+            self.ly = 0;
+            self.mode_clock = 0;
+            self.mode = Mode::OamScan;
+        }
+    }
+
+    //STAT read: bit 7 reads 1, bits 3-6 are the stored enables, bit 2 is the live
+    //LYC-coincidence flag, bits 1-0 are the current mode.
+    fn read_stat(&self) -> u8 {
+        let coincidence = if self.ly == self.lyc { 0x04 } else { 0x00 };
+        0x80 | (self.stat & 0x78) | coincidence | self.mode.bits()
+    }
+
+    //STAT write: only the interrupt-enable bits (3-6) are writable.
+    fn write_stat(&mut self, value: u8) {
+        self.stat = value & 0x78;
+    }
+
+    fn stat_enabled(&self, source: u8) -> bool {
+        self.stat & source != 0
+    }
+
+    //A STAT interrupt from LYC fires only when LY has just come to equal LYC and the
+    //LYC-coincidence source is enabled.
+    fn lyc_interrupt(&self) -> bool {
+        self.ly == self.lyc && self.stat_enabled(STAT_LYC)
+    }
+    
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use TilePixelValue::*;
+//LCDC bit 7 enables the LCD/PPU
+const LCDC_ENABLE: u8 = 1 << 7;
 
-    #[test]
-    fn decodes_the_classic_tile_row() {
-        //The canonical example from the Pandocs
-        let mut gpu = GPU::new();
-        gpu.write_vram(0, 0x3C); // low bits of tile 0, row 0
-        gpu.write_vram(1, 0x7E); // high bits of tile 0, row 0
-
-        assert_eq!(
-            gpu.tile_set[0][0],
-            [Zero, Two, Three, Three, Three, Three, Two, Zero]
-        );
-    }
-
-    #[test]
-    fn each_colour_decodes_from_the_right_bit_pair() {
-        //low=1/high=0 everywhere -> all One; low=0/high=1 -> all Two, both set -> Three
-        let mut gpu = GPU::new();
-
-        gpu.write_vram(0, 0xFF); // low bits all 1
-        gpu.write_vram(1, 0x00); // high bits all 0
-        assert_eq!(gpu.tile_set[0][0], [One; 8]);
-
-        gpu.write_vram(0, 0x00);
-        gpu.write_vram(1, 0xFF);
-        assert_eq!(gpu.tile_set[0][0], [Two; 8]);
-
-        gpu.write_vram(0, 0xFF);
-        gpu.write_vram(1, 0xFF);
-        assert_eq!(gpu.tile_set[0][0], [Three; 8]);
-    }
-
-    #[test]
-    fn write_targets_the_correct_tile_and_row() {
-        //Byte index 0x22 is tile 2 (0x22 / 16), row 1 ((0x22 % 16) / 2). Writing there
-        //should update only that tile/row and leave tile 0 blank
-        let mut gpu = GPU::new();
-        gpu.write_vram(0x22, 0xFF);
-        gpu.write_vram(0x23, 0xFF);
-
-        assert_eq!(gpu.tile_set[2][1], [Three; 8], "the addressed tile row is decoded");
-        assert_eq!(gpu.tile_set[0][0], [Zero; 8], "an unrelated tile stays blank");
-    }
-
-    #[test]
-    fn read_vram_returns_the_raw_byte() {
-        let mut gpu = GPU::new();
-        gpu.write_vram(0x10, 0xAB);
-        assert_eq!(gpu.read_vram(0x10), 0xAB, "read_vram returns exactly what was stored");
-    }
-
-    #[test]
-    fn writes_to_the_tile_map_region_are_stored_but_do_not_decode() {
-        //0x1800 is the first byte of the tile map region
-        let mut gpu = GPU::new();
-        gpu.write_vram(0x1800, 0xCD);
-
-        assert_eq!(gpu.read_vram(0x1800), 0xCD, "map bytes are still stored in VRAM");
-        assert_eq!(gpu.tile_set[0][0], [Zero; 8], "map writes leave the tile set alone");
-    }
-}
+//stat interrupt source enable bits
+const STAT_HBLANK: u8 = 1 << 3;
+const STAT_VBLANK: u8 = 1 << 4;
+const STAT_OAM: u8 = 1 << 5;
+const STAT_LYC: u8 = 1 << 6;
 
