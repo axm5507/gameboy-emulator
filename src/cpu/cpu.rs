@@ -32,7 +32,15 @@ impl CPU {
         }
     }
 
+    //run one CPU step and keep rest of machine in sync
+    pub fn step(&mut self) -> u8 {
+        let cycles = self.run_next_step();
+        self.bus.tick(cycles);
+        cycles
+    }
 
+
+    
     //if you're familiar with how a CPU works, you'll recognize this as a fetch-decode-execute
     //cycle. First, we fetch(read the opcode byte that the program counter points at), then we
     //decode(turn the byte into an Instruction), then we execute(run it, which also tells us where
@@ -40,10 +48,11 @@ impl CPU {
     //the next address.
     //I now made it so it returns the number of T cycles(4.19 MHz clock ticks) the instruction took,
     //which is what the rest of the stuff I am going to implement(PPU, timer) will be clocked against
-    pub fn step(&mut self) -> u8 {
+    fn run_next_step(&mut self) -> u8 {
         let pending = self.pending_interrupt();
 
-        //halted cpu does nothing until interrupt wakes it
+        //A halted CPU wakes as soon as any enabled interrupt is requested, even when
+        //the master enable (IME) is off
         if self.is_halted {
             if pending.is_some() {
                 self.is_halted = false;
@@ -52,23 +61,25 @@ impl CPU {
             }
         }
 
-        //if interrupts are globally enabled and one is pending, service it
+        //If interrupts are globally enabled and one is pending, service it instead of
+        //running a normal instruction this step
         if self.ime {
             if let Some(interrupt) = pending {
                 return self.service_interrupt(interrupt);
             }
         }
 
-        //An EI on previous step enables IME after the following instruction. 
+        //An EI on the previous step enables IME after the following instruction(the
+        //one-instruction delay)
         let enable_ime_after = self.ime_pending;
-        
+
         let mut instruction_byte = self.bus.read_byte(self.registers.pc);
 
 
         //0xcb is a prefix opcode. When the processor encounters it, it knows to read the
         //next byte in memory and execute an extended bitwise operation. When we read the
         //following byte we remember we're prefixed so we decode against the right table
-        //and account for the extra byte later.
+        //and account for the extra byte later
         let prefixed = instruction_byte == 0xCB;
         if prefixed {
             instruction_byte = self.bus.read_byte(self.registers.pc.wrapping_add(1));
@@ -78,7 +89,7 @@ impl CPU {
             if let Some(instruction) = Instruction::from_byte(instruction_byte, prefixed) {
                 //Work out the timing before executing. The only instructions whose cost
                 //depends on runtime state are conditional branches, and those don't touch
-                //the flags they test, so measuring first gives the same answer
+                //the flags they test, so measuring first gives the same answer.
                 let cycles = self.instruction_cycles(instruction);
                 (self.execute(instruction), cycles)
             } else {
@@ -89,13 +100,12 @@ impl CPU {
 
         self.registers.pc = next_pc;
 
-        //Apply the delayed EI. The self.ime_pending recheck means a DI executed in
-        //this same slot correctly wins over the pending EI
+        //Apply the delayed EI
         if enable_ime_after && self.ime_pending {
             self.ime = true;
             self.ime_pending = false;
         }
-        
+
         cycles
     }
 
