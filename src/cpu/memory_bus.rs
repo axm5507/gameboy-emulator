@@ -3,7 +3,7 @@
 //inclusive. That is 0x10000 (65,536) distinct addresses, which means the backing
 //array needs 0x10000 bytes.
 //we route VRAM to the GPU so it can keep its decoded tile set in sync
-use crate::gpu::{GPU, VRAM_BEGIN, VRAM_END};
+use crate::gpu::{BGP_ADDRESS, GPU, LCDC_ADDRESS, LYC_ADDRESS, VRAM_BEGIN, VRAM_END, WX_ADDRESS,};
 use crate::interrupts::{INTERRUPT_FLAG_ADDRESS, Interrupt};
 use crate::joypad::{Button, JOYPAD_ADDRESS, Joypad};
 use crate::timer::{DIV_ADDRESS, TAC_ADDRESS, Timer};
@@ -30,10 +30,12 @@ impl MemoryBus {
         match address {
             JOYPAD_ADDRESS => self.joypad.read(),
             DIV_ADDRESS..=TAC_ADDRESS => self.timer.read(address),
+            //The LCD registers, minus DMA (0xFF46), which stays in flat memory for now
+            LCDC_ADDRESS..=LYC_ADDRESS | BGP_ADDRESS..=WX_ADDRESS => self.gpu.read_register(address),
             _ => {
                 let address = address as usize;
                 match address {
-                    //VRAM reads come from the GPU, in VRAM relative indices
+                    //VRAM reads come from the gpu
                     VRAM_BEGIN..=VRAM_END => self.gpu.read_vram(address - VRAM_BEGIN),
                     _ => self.memory[address],
                 }
@@ -45,10 +47,13 @@ impl MemoryBus {
         match address {
             JOYPAD_ADDRESS => self.joypad.write(value),
             DIV_ADDRESS..=TAC_ADDRESS => self.timer.write(address, value),
+            LCDC_ADDRESS..=LYC_ADDRESS | BGP_ADDRESS..=WX_ADDRESS => {
+                self.gpu.write_register(address, value)
+            }
             _ => {
                 let address = address as usize;
                 match address {
-                    //VRAM writes go to the GPU, which also updates its cached tile set
+                    //VRAM writes go to the gpu
                     VRAM_BEGIN..=VRAM_END => self.gpu.write_vram(address - VRAM_BEGIN, value),
                     _ => self.memory[address] = value,
                 }
@@ -61,6 +66,13 @@ impl MemoryBus {
         pub fn tick(&mut self, cycles: u8) {
         if self.timer.step(cycles) {
             self.request_interrupt(Interrupt::Timer);
+        }
+        let ppu = self.gpu.step(cycles);
+        if ppu.vblank {
+            self.request_interrupt(Interrupt::VBlank);
+        }
+        if ppu.stat {
+            self.request_interrupt(Interrupt::LcdStat);
         }
     }
     
