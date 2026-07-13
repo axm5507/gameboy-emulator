@@ -92,6 +92,8 @@ pub struct GPU {
     pub tile_set: [Tile; TILE_COUNT],
     //LCD registers
     lcdc: u8,
+    //rendered picture, one palette resolved shade per pixel, row major
+    pub framebuffer: [TilePixelValue; SCREEN_WIDTH * SCREEN_HEIGHT],
     //stat holds writable interrupt enable bits. Mode and lyc coincidence bits
     //are derived on read
     stat: u8,
@@ -115,6 +117,7 @@ impl GPU {
         Self {
             vram: [0; VRAM_SIZE],
             tile_set: [empty_tile(); TILE_COUNT],
+            framebuffer: [TilePixelValue::Zero; SCREEN_WIDTH * SCREEN_HEIGHT],
             //post reset hte LCD is off, game turns it on by setting LCDC bit 7
             lcdc: 0,
             stat: 0,
@@ -322,15 +325,92 @@ impl GPU {
     fn lyc_interrupt(&self) -> bool {
         self.ly == self.lyc && self.stat_enabled(STAT_LYC)
     }
+    //Paint the current scanline (self.ly) of the background into the framebuffer.
+    //
+    //The background is a 256x256 (32x32 tile) surface that the screen looks at through a
+    //window offset by SCX/SCY, wrapping around at the edges. For each of the 160 pixels
+    //on this line we work out where it lands on that surface, find the tile there, read
+    //the tile's pixel, and run it through the BGP palette.
+    fn render_scanline(&mut self) {
+        let line = self.ly as usize;
+        let row_start = line * SCREEN_WIDTH;
+
+        //With BG/Window disabled (LCDC bit 0), the line is blank white on the DMG.
+        if self.lcdc & LCDC_BG_ENABLE == 0 {
+            for pixel in &mut self.framebuffer[row_start..row_start + SCREEN_WIDTH] {
+                *pixel = TilePixelValue::Zero;
+            }
+            return;
+        }
+
+        let map_offset = if self.lcdc & LCDC_BG_MAP != 0 {
+            TILE_MAP_1
+        } else {
+            TILE_MAP_0
+        };
+        //LCDC bit 4 picks the tile-data addressing: set = unsigned from tile 0 (0x8000);
+        //clear = signed, where tile number 0 means tile 256 (0x9000) and the number is
+        //treated as an i8 offset from there.
+        let signed_tiles = self.lcdc & LCDC_TILE_DATA == 0;
+
+        //Vertical position on the background surface (wraps at 256), and which tile row
+        //and pixel-within-tile that is. This is constant across the whole scanline.
+        let bg_y = self.ly.wrapping_add(self.scy) as usize;
+        let tile_row = bg_y / 8;
+        let pixel_y = bg_y % 8;
+
+        for x in 0..SCREEN_WIDTH {
+            let bg_x = (x as u8).wrapping_add(self.scx) as usize;
+            let tile_col = bg_x / 8;
+            let pixel_x = bg_x % 8;
+
+            //Look up the tile number for this cell in the map.
+            let map_index = tile_row * TILES_PER_ROW + tile_col;
+            let tile_number = self.vram[map_offset + map_index];
+
+            let tile_index = if signed_tiles {
+                (256i16 + tile_number as i8 as i16) as usize
+            } else {
+                tile_number as usize
+            };
+
+            let color = self.tile_set[tile_index][pixel_y][pixel_x];
+            self.framebuffer[row_start + x] = Self::apply_palette(self.bgp, color);
+        }
+    }
+
+    //Map a tile's raw 2-bit color through a palette register to an actual shade. The
+    //palette packs four shades into its byte: bits 1-0 are the shade for color 0, bits
+    //3-2 for color 1, and so on.
+    fn apply_palette(palette: u8, color: TilePixelValue) -> TilePixelValue {
+        let color_index = match color {
+            TilePixelValue::Zero => 0,
+            TilePixelValue::One => 1,
+            TilePixelValue::Two => 2,
+            TilePixelValue::Three => 3,
+        };
+        let shade = (palette >> (color_index * 2)) & 0b11;
+        match shade {
+            0 => TilePixelValue::Zero,
+            1 => TilePixelValue::One,
+            2 => TilePixelValue::Two,
+            _ => TilePixelValue::Three,
+        }
+    }
+    
     
 }
 
-//LCDC bit 7 enables the LCD/PPU
+//LCDC bit 7 enables the LCD/PPU.
 const LCDC_ENABLE: u8 = 1 << 7;
+//LCDC bit 0 enables the background (and window); bit 3 picks the BG tile map; bit 4
+//picks the tile-data area / addressing mode.
+const LCDC_BG_ENABLE: u8 = 1 << 0;
+const LCDC_BG_MAP: u8 = 1 << 3;
+const LCDC_TILE_DATA: u8 = 1 << 4;
 
-//stat interrupt source enable bits
+//STAT interrupt-source enable bits.
 const STAT_HBLANK: u8 = 1 << 3;
 const STAT_VBLANK: u8 = 1 << 4;
 const STAT_OAM: u8 = 1 << 5;
 const STAT_LYC: u8 = 1 << 6;
-
