@@ -82,8 +82,13 @@ impl MemoryBus {
         let flags = self.read_byte(INTERRUPT_FLAG_ADDRESS);
         self.write_byte(INTERRUPT_FLAG_ADDRESS, flags | interrupt.bit());
     }
+
+    pub fn load_rom(&mut self, data: &[u8]) {
+        let len = data.len().min(0x8000);
+        self.memory[..len].copy_from_slice(&data[..len]);
+    }
     
-        pub fn press_button(&mut self, button: Button) {
+    pub fn press_button(&mut self, button: Button) {
         if self.joypad.press(button) {
             self.request_interrupt(Interrupt::Joypad);
         }
