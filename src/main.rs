@@ -29,14 +29,27 @@ const KEY_MAP: [(Key, Button); 8] = [
 fn main() {
     let mut cpu = CPU::new();
 
-    //A ROM path on the command line is loaded into the cartridge region
-    match std::env::args().nth(1) {
+    //A ROM path on the command line is loaded into the cartridge region. If not we
+    //show a built in demo so there's something on screen straight away
+    let save_path = match std::env::args().nth(1) {
         Some(path) => {
             let rom = std::fs::read(&path).unwrap_or_else(|e| panic!("could not read '{path}': {e}"));
-            cpu.skip_boot_rom()
+            cpu.bus.load_rom(&rom);
+            //Jump straight into the cartridge as if the boot ROM had already run
+            cpu.skip_boot_rom();
+
+            //Restore a previous save, if there is one, from "<rom>.sav"
+            let save_path = std::path::Path::new(&path).with_extension("sav");
+            if let Ok(save) = std::fs::read(&save_path) {
+                cpu.bus.load_battery_ram(&save);
+            }
+            Some(save_path)
         }
-        None => load_demo(&mut cpu),
-    }
+        None => {
+            load_demo(&mut cpu);
+            None
+        }
+    };
 
     let mut window = Window::new(
         "Game Boy",
@@ -58,6 +71,15 @@ fn main() {
         window
             .update_with_buffer(&buffer, SCREEN_WIDTH, SCREEN_HEIGHT)
             .expect("failed to present frame");
+    }
+
+    //On a clean exit, persist battery RAM back to the .sav
+    if let Some(path) = &save_path {
+        if let Some(ram) = cpu.bus.battery_ram() {
+            if let Err(e) = std::fs::write(path, ram) {
+                eprintln!("warning: could not write save file {}: {e}", path.display());
+            }
+        }
     }
 }
 
