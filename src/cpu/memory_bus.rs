@@ -112,9 +112,26 @@ impl MemoryBus {
         self.write_byte(INTERRUPT_FLAG_ADDRESS, flags | interrupt.bit());
     }
 
+    //Install a cartridge from its raw ROM bytes. From now on the ROM/RAM ranges are
+    //served by the cartridge instead of flat memory
     pub fn load_rom(&mut self, data: &[u8]) {
-        let len = data.len().min(0x8000);
-        self.memory[..len].copy_from_slice(&data[..len]);
+        self.cartridge = Some(Cartridge::new(data.to_vec()));
+    }
+
+    //Restore battery backed cartridge RAM from a save file
+    pub fn load_battery_ram(&mut self, data: &[u8]) {
+        if let Some(cart) = &mut self.cartridge {
+            cart.load_ram(data);
+        }
+    }
+
+    //The cartridge RAM to write out to a save file, but only for battery-backed carts
+    //that actually have RAM
+    pub fn battery_ram(&self) -> Option<&[u8]> {
+        match &self.cartridge {
+            Some(cart) if cart.has_battery() && !cart.ram().is_empty() => Some(cart.ram()),
+            _ => None,
+        }
     }
     
     pub fn press_button(&mut self, button: Button) {
