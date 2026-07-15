@@ -4,6 +4,7 @@ mod gpu;
 mod interrupts;
 mod joypad;
 mod timer;
+mod cartridge;
 
 use cpu::CPU;
 use gpu::{SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -32,7 +33,7 @@ fn main() {
     match std::env::args().nth(1) {
         Some(path) => {
             let rom = std::fs::read(&path).unwrap_or_else(|e| panic!("could not read '{path}': {e}"));
-            cpu.bus.load_rom(&rom);
+            cpu.skip_boot_rom()
         }
         None => load_demo(&mut cpu),
     }
