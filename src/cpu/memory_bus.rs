@@ -9,6 +9,9 @@ use crate::interrupts::{INTERRUPT_FLAG_ADDRESS, Interrupt};
 use crate::joypad::{Button, JOYPAD_ADDRESS, Joypad};
 use crate::timer::{DIV_ADDRESS, TAC_ADDRESS, Timer};
 
+//how many bytes an OAM DMA transfer copies
+const OAM_SIZE_BYTES: usize = (OAM_END - OAM_BEGIN + 1) as usize;
+
 pub struct MemoryBus {
     memory: [u8; 0x10000],
     pub gpu: GPU,
@@ -31,19 +34,20 @@ impl MemoryBus {
 
     pub fn read_byte(&self, address: u16) -> u8 {
         match address {
-            //ROM banks and cartridge RAM. With no cartridge these fall back to flat RAM
+            //ROM banks and cartridge RAM
             0x0000..=0x7FFF | 0xA000..=0xBFFF => match &self.cartridge {
                 Some(cart) => cart.read(address),
                 None => self.memory[address as usize],
             },
+            OAM_BEGIN..=OAM_END => self.gpu.read_oam((address - OAM_BEGIN) as usize),
             JOYPAD_ADDRESS => self.joypad.read(),
             DIV_ADDRESS..=TAC_ADDRESS => self.timer.read(address),
-            //The LCD registers, minus DMA (0xFF46), which stays in flat memory for now
+            //The LCD registers, minus DMA
             LCDC_ADDRESS..=LYC_ADDRESS | BGP_ADDRESS..=WX_ADDRESS => self.gpu.read_register(address),
             _ => {
                 let address = address as usize;
                 match address {
-                    //VRAM reads come from the GPU, in VRAM relative indices
+                    //VRAM reads come from the GPU
                     VRAM_BEGIN..=VRAM_END => self.gpu.read_vram(address - VRAM_BEGIN),
                     _ => self.memory[address],
                 }
@@ -52,21 +56,24 @@ impl MemoryBus {
     }
     pub fn write_byte(&mut self, address: u16, value: u8) {
         match address {
-            //Writes into ROM space poke the MBC's control registers, cart RAM writes go
+            //Writes into ROM space poke the MBC's control registers; cart-RAM writes go
             //to the RAM
             0x0000..=0x7FFF | 0xA000..=0xBFFF => match &mut self.cartridge {
                 Some(cart) => cart.write(address, value),
                 None => self.memory[address as usize] = value,
             },
+            OAM_BEGIN..=OAM_END => self.gpu.write_oam((address - OAM_BEGIN) as usize, value),
             JOYPAD_ADDRESS => self.joypad.write(value),
             DIV_ADDRESS..=TAC_ADDRESS => self.timer.write(address, value),
+            //Writing DMA kicks off a bulk copy into OAM 
+            DMA_ADDRESS => self.oam_dma(value),
             LCDC_ADDRESS..=LYC_ADDRESS | BGP_ADDRESS..=WX_ADDRESS => {
                 self.gpu.write_register(address, value)
             }
             _ => {
                 let address = address as usize;
                 match address {
-                    //VRAM writes go to GPU
+                    //VRAM writes go to the GPU
                     VRAM_BEGIN..=VRAM_END => self.gpu.write_vram(address - VRAM_BEGIN, value),
                     _ => self.memory[address] = value,
                 }
@@ -76,7 +83,7 @@ impl MemoryBus {
 
     //This advanced cycle driven peripherals by cycles T cycles, raising interrupts they might generate
     //The CPU calls this after every step so timer and PPU stays in lockstep with instruction execution
-        pub fn tick(&mut self, cycles: u8) {
+    pub fn tick(&mut self, cycles: u8) {
         if self.timer.step(cycles) {
             self.request_interrupt(Interrupt::Timer);
         }
@@ -86,6 +93,15 @@ impl MemoryBus {
         }
         if ppu.stat {
             self.request_interrupt(Interrupt::LcdStat);
+        }
+    }
+
+    //writing the high byte of a source address to 0xFF46, copying 160 bytes from that page into OAM
+    fn oam_dma(&mut self, source_page: u8) {
+        let source = (source_page as u16) << 8;
+        for i in 0..OAM_SIZE_BYTES {
+            let byte = self.read_byte(source + i as u16);
+            self.gpu.write_oam(i, byte);
         }
     }
     
