@@ -5,6 +5,8 @@
 //I'm implementing MBC1, the most common controller. Its logic covers plain 32kb 
 //ROM only carts, which never write to the banking registers. 
 
+use std::time::{Duration, Instant};
+
 const ROM_BANK_SIZE: usize = 0x4000; //16kb
 const RAM_BANK_SIZE: usize = 0x2000; //8kb
 
@@ -16,6 +18,7 @@ pub struct Cartridge {
     rom: Vec<u8>,
     ram: Vec<u8>,
     mbc: Mbc,
+    has_battery: bool,
 }
 
 impl Cartridge {
@@ -23,8 +26,26 @@ impl Cartridge {
         let cart_type = rom.get(CART_TYPE_HEADER).copied().unwrap_or(0);
         let ram = vec![0; ram_size(rom.get(RAM_SIZE_HEADER).copied().unwrap_or(0))];
         let mbc = Mbc::for_cart_type(cart_type);
-        Self { rom, ram, mbc }
+        let has_battery = battery_backed(cart_type);
+        Self { rom, ram, mbc, has_battery,
+             }
     }
+    //True for carts with a battery or the ones whos RAM should be saved to disk
+    pub fn has_battery(&self) -> bool {
+        self.has_battery
+    }
+
+    //The current cartridge RAM for writing out to a save file
+    pub fn ram(&self) -> &[u8] {
+        &self.ram
+    }
+
+    //Restore cartridge RAM from a save file
+    pub fn load_ram(&mut self, data: &[u8]) {
+        let len = self.ram.len().min(data.len());
+        self.ram[..len].copy_from_slice(&data[..len]);
+    }
+    
 
     pub fn read(&self, address: u16) -> u8 {
         match address {
@@ -65,6 +86,14 @@ fn ram_size(header: u8) -> usize {
     }
 }
 
+//Checks whether the cartridge type (0x0147) includes a battery
+fn battery_backed(cart_type: u8) -> bool {
+    matches!(
+        cart_type,
+        0x03 | 0x06 | 0x09 | 0x0D | 0x0F | 0x10 | 0x13 | 0x1B | 0x1E | 0x22 | 0xFF
+    )
+}
+
 //The banking state for whichever controller a cartridge uses
 enum Mbc {
     None,
@@ -101,7 +130,7 @@ impl Mbc {
                 ram_enabled: false,
                 rom_bank: 1,
                 ram_bank: 0,
-                rtc: Rtc::default(),
+                rtc: Rtc::new(),
             },
             0x19..=0x1E => Mbc::Mbc5 {
                 ram_enabled: false,
@@ -309,17 +338,32 @@ fn write_ram_at(ram: &mut [u8], bank: usize, address: u16, value: u8) {
 //MBC3's real-time clock. The five registers are seconds/minutes/hours/day-low/day-high.
 //A game reads them via the 0xA000-0xBFFF window (after selecting an RTC register with a
 //write to 0x4000-0x5FFF) but only after writing 0x00 then 0x01 to 0x6000-0x7FFF copies
-//the live registers into the readable, latched copy.
+//the live registers into the readable copy
+
+const RTC_HALT: u8 = 0x40; // day high bit 6
+const RTC_DAY_CARRY: u8 = 0x80; // day high bit 7
+
 #[derive(Clone, Copy, Default)]
 struct Rtc {
     registers: [u8; 5],
     latched: [u8; 5],
     last_latch_write: u8,
+    last_tick: Instant,
 }
 
 impl Rtc {
+    fn new() -> Self {
+        Self {
+            registers: [0; 5],
+            latched: [0; 5],
+            last_latch_write: 0xFF,
+            last_tick: Instant::now(),
+        }
+    }
+
     fn latch(&mut self, value: u8) {
         if self.last_latch_write == 0x00 && value == 0x01 {
+            self.tick();
             self.latched = self.registers;
         }
         self.last_latch_write = value;
@@ -330,6 +374,49 @@ impl Rtc {
     }
 
     fn write(&mut self, select: u8, value: u8) {
+        //Bring the clock current, then set the register and re anchor from now
+        self.tick();
         self.registers[(select - 0x08) as usize] = value;
+        self.last_tick = Instant::now();
+    }
+
+    //Catch the live registers up to real time
+    fn tick(&mut self) {
+        let elapsed = self.last_tick.elapsed().as_secs();
+        if elapsed > 0 {
+            self.last_tick += Duration::from_secs(elapsed);
+            self.advance(elapsed);
+        }
+    }
+
+    //Add `seconds` to the clock, unless it's halted
+    fn advance(&mut self, seconds: u64) {
+        if self.registers[4] & RTC_HALT != 0 {
+            return;
+        }
+        self.add_seconds(seconds);
+    }
+
+    fn add_seconds(&mut self, seconds: u64) {
+        let mut s = self.registers[0] as u64 + seconds;
+        let mut m = self.registers[1] as u64 + s / 60;
+        s %= 60;
+        let mut h = self.registers[2] as u64 + m / 60;
+        m %= 60;
+        let day = self.registers[3] as u64 | (((self.registers[4] & 0x01) as u64) << 8);
+        let mut d = day + h / 24;
+        h %= 24;
+
+        //The 9bit day counter overflows past 511 into a sticky carry(day high bit 7)
+        let carry = self.registers[4] & RTC_DAY_CARRY != 0 || d > 0x1FF;
+        d &= 0x1FF;
+
+        self.registers[0] = s as u8;
+        self.registers[1] = m as u8;
+        self.registers[2] = h as u8;
+        self.registers[3] = d as u8;
+        self.registers[4] = (self.registers[4] & RTC_HALT)
+            | if carry { RTC_DAY_CARRY } else { 0 }
+            | ((d >> 8) as u8 & 0x01);
     }
 }
