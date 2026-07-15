@@ -32,6 +32,29 @@ impl CPU {
         }
     }
 
+    //This is to put the CPU into the state the DMG boot ROM leaves behind so a cartridge can start
+    //executing at 0x100 as if the boot sequence already ran. I'm not emulating the boot ROM itself,
+    //these are its handoff values. This is called after loading a real ROM
+    pub fn skip_boot_rom(&mut self) {
+        self.registers.a = 0x01;
+        self.registers.f = 0xB0; // Z and H and C set, N clear
+        self.registers.b = 0x00;
+        self.registers.c = 0x13;
+        self.registers.d = 0x00;
+        self.registers.e = 0xD8;
+        self.registers.h = 0x01;
+        self.registers.l = 0x4D;
+        self.registers.sp = 0xFFFE;
+        self.registers.pc = 0x0100; // the cartridge entry point
+
+        //A few I/O registers the boot ROM leaves set 
+        self.bus.write_byte(0xFF40, 0x91); // LCDC: LCD + BG on
+        self.bus.write_byte(0xFF47, 0xFC); // BGP
+        self.bus.write_byte(0xFF48, 0xFF); // OBP0
+        self.bus.write_byte(0xFF49, 0xFF); // OBP1
+    }
+
+
     //run one CPU step and keep rest of machine in sync
     pub fn step(&mut self) -> u8 {
         let cycles = self.run_next_step();
