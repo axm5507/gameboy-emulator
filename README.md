@@ -4,7 +4,7 @@ I've recently been getting back into playing video games, so I decided to create
 
 Some limitations right now are the lack of audio and no color. Furthermore, the real time clock ticks are consistent within a session but don't persist across runs, but this doesn't really matter because it's just an emulator. Maybe in the future I'll make a gameboy color emulator!  
 
-##Project structure
+## Project structure
 
 ```
 src/
@@ -47,7 +47,7 @@ The **cartridge**([`cartridge.rs`](src/cartridge.rs)) is responsible for storing
 
 The frontend([`main.rs`](src/main.rs)) loads the cartridge, initializes the CPU to the same state it would have after the Game Boy's boot ROM finishes executing, and then loops. It runs one frame's worth of cycles, reads the keyboard into the joypad, and converts the framebuffer to greyscale pixels([`display.rs`](src/display.rs)). Finally, it displays the complete image and repeats the process.  
 
-##How to run:
+## How to run:
 
 **Prerequisites:** [Rust](https://rustup.rs/) 2024  
 
