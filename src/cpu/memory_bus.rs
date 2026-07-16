@@ -4,7 +4,8 @@
 //array needs 0x10000 bytes.
 //we route VRAM to the GPU so it can keep its decoded tile set in sync
 use crate::cartridge::Cartridge;
-use crate::gpu::{BGP_ADDRESS, GPU, LCDC_ADDRESS, LYC_ADDRESS, VRAM_BEGIN, VRAM_END, WX_ADDRESS,};
+use crate::gpu::{BGP_ADDRESS, DMA_ADDRESS, GPU, LCDC_ADDRESS, LYC_ADDRESS, OAM_BEGIN, OAM_END, VRAM_BEGIN,
+    VRAM_END, WX_ADDRESS};
 use crate::interrupts::{INTERRUPT_FLAG_ADDRESS, Interrupt};
 use crate::joypad::{Button, JOYPAD_ADDRESS, Joypad};
 use crate::timer::{DIV_ADDRESS, TAC_ADDRESS, Timer};
