@@ -148,7 +148,7 @@ impl GPU {
         Self {
             vram: [0; VRAM_SIZE],
             tile_set: [empty_tile(); TILE_COUNT],
-            oam: [0, OAM_SIZE],
+            oam: [0; OAM_SIZE],
             framebuffer: [TilePixelValue::Zero; SCREEN_WIDTH * SCREEN_HEIGHT],
             //post reset hte LCD is off, game turns it on by setting LCDC bit 7
             lcdc: 0,
