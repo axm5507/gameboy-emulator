@@ -272,7 +272,7 @@ impl GPU {
             Mode::Drawing => {
                 if self.mode_clock >= DRAWING_CYCLES {
                     self.mode_clock -= DRAWING_CYCLES;
-                    //need to draw scanline `self.ly` into the framebuffer here.
+                    self.render_scanline();
                     self.mode = Mode::HBlank;
                     if self.stat_enabled(STAT_HBLANK) {
                         interrupts.stat = true;
@@ -309,6 +309,7 @@ impl GPU {
                     if self.ly >= TOTAL_LINES {
                         //Wrap back to the top and start a fresh frame.
                         self.ly = 0;
+                        self.window_line = 0;
                         self.mode = Mode::OamScan;
                         if self.stat_enabled(STAT_OAM) {
                             interrupts.stat = true;
