@@ -343,7 +343,7 @@ fn write_ram_at(ram: &mut [u8], bank: usize, address: u16, value: u8) {
 const RTC_HALT: u8 = 0x40; // day high bit 6
 const RTC_DAY_CARRY: u8 = 0x80; // day high bit 7
 
-#[derive(Clone, Copy, Default)]
+
 struct Rtc {
     registers: [u8; 5],
     latched: [u8; 5],
