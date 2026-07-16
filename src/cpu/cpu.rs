@@ -253,6 +253,9 @@ impl CPU {
             Instruction::PUSH(_) => 16,
             Instruction::POP(_) => 12,
             Instruction::LD(load_type) => Self::load_cycles(load_type),
+            Instruction::LD(load_type) => Self::load_cycles(load_type),
+            Instruction::DI | Instruction::EI => 4,
+            Instruction::RETI => 16,
         }
     }
 
@@ -522,18 +525,6 @@ impl CPU {
                     StackTarget::DE => self.registers.set_de(value),
                     StackTarget::HL => self.registers.set_hl(value),
                     //set_af masks off the low nibble of F, keeping those bits 0 as the hardware does
-                    StackTarget::AF => self.registers.set_af(value),
-                }
-                self.registers.pc.wrapping_add(1)
-            }
-            Instruction::POP(target) => {
-                let value = self.pop();
-                match target {
-                    StackTarget::BC => self.registers.set_bc(value),
-                    StackTarget::DE => self.registers.set_de(value),
-                    StackTarget::HL => self.registers.set_hl(value),
-                    //set_af masks off the low nibble of F, keeping those bits 0 as
-                    //the hardware does even if a bogus value was popped in.
                     StackTarget::AF => self.registers.set_af(value),
                 }
                 self.registers.pc.wrapping_add(1)
