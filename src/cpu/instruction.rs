@@ -73,6 +73,9 @@ pub enum Instruction {
     //instruction onto the stack and RET pops that address back to the pc to return
     CALL(JumpTest),
     RET(JumpTest),
+    DI,
+    EI,
+    RETI,
 }
 
 //jump can be unconditional or gated on the state of a flag. If the condition
@@ -521,7 +524,11 @@ impl Instruction {
             0xD0 => Some(Instruction::RET(JumpTest::NotCarry)),
             0xD8 => Some(Instruction::RET(JumpTest::Carry)),
             0xC9 => Some(Instruction::RET(JumpTest::Always)),
-
+            
+            0xF3 => Some(Instruction::DI),
+            0xFB => Some(Instruction::EI),
+            0xD9 => Some(Instruction::RETI),
+            
             _ => Instruction::from_byte_load(byte),
         }
     }
