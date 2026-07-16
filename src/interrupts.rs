@@ -7,6 +7,15 @@
 pub const INTERRUPT_ENABLE_ADDRESS: u16 = 0xFFFF; // IE
 pub const INTERRUPT_FLAG_ADDRESS: u16 = 0xFF0F; // IF
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interrupt {
+    VBlank,
+    LcdStat,
+    Timer,
+    Serial,
+    Joypad,
+}
+
 impl Interrupt {
     //Highest priority first, the CPU services the earliest source in this list that is
     //both enabled (IE) and requested (IF)
