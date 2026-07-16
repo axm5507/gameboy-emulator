@@ -209,8 +209,7 @@ impl Instruction {
     }
 
     //This decodes the low 3 bits of a 0xCB opcode into a register target. Index 6 
-    //is the (HL) memory operand, which needs a memory access we haven't built yet,
-    //so we return None for it for now
+    //is the (HL) memory operand
     fn prefixed_target(byte: u8) -> ArithmeticTarget {
         match byte & 0x07 {
             0 => ArithmeticTarget::B,
@@ -223,6 +222,7 @@ impl Instruction {
             _ => ArithmeticTarget::A,
         }
     }
+
 
     //This decodes bits 3 to 5 of a 0xCB opcode into the bit number used by BIT/RES/SET.
     //For the rotate/shift/swap opcodes these bits are part of the operation
