@@ -186,7 +186,7 @@ impl Instruction {
     //For BIT/RES/SET the middle 3 bits (byte >> 3 & 0x07) also encode which bit (0-7)
     //I haven't written code to support the (HL) memory operand yet, so target index 6 decodes to None.
     fn from_byte_prefixed(byte: u8) -> Option<Instruction> {
-        let target = Instruction::prefixed_target(byte)?;
+        let target = Instruction::prefixed_target(byte);
         let bit = Instruction::bit_position(byte);
 
         let instruction = match byte {
